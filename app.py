@@ -3,18 +3,24 @@ import pandas as pd
 import plotly.express as px
 import google.generativeai as genai
 import requests
-from PIL import Image
-import json
 import os
+import json
+from PIL import Image
+from datetime import datetime
 
-# --- CONFIGURAÇÃO ---
-FILE_DB = 'ranking_lol_final.csv'
+# --- CONFIGURAÇÃO DE AMBIENTE ---
+FILE_DB = 'ranking_bravura_season_2026.csv'
+SEASON_START_TIMESTAMP = 1735689600  # 01/01/2026 00:00:00 UTC
+
 def init_db():
     if not os.path.exists(FILE_DB):
-        df = pd.DataFrame(columns=['Data', 'Jogador', 'Tipo', 'Vitoria', 'Score', 'K', 'D', 'A', 'Part', 'Torres', 'Dano'])
+        df = pd.DataFrame(columns=[
+            'MatchID', 'Data', 'Jogador', 'Tipo', 'Vitoria', 'Score', 
+            'K', 'D', 'A', 'Part', 'Dano_Estruturas', 'DPM', 'Pinks'
+        ])
         df.to_csv(FILE_DB, index=False)
 
-st.set_page_config(page_title="LoL Aggressive Rank", layout="wide")
+st.set_page_config(page_title="Bravura Season 2026", layout="wide")
 init_db()
 
 # Secrets
@@ -23,92 +29,128 @@ riot_key = st.secrets.get("RIOT_KEY")
 
 if gemini_key:
     genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('models/gemini-1.5-flash')
 
-# --- FUNÇÃO RIOT (FLEX) ---
-def buscar_riot_flex(nome, tag):
+# --- LÓGICA DE CÁLCULO ---
+def calcular_score_bravura(v, d, part, dano_est, dano_camp, minutos, pinks):
+    score = 25 if v else 0
+    score += (part * 40)
+    dpm = dano_camp / minutos if minutos > 0 else 0
+    score += (dpm / 100)
+    score += (dano_est / 500)
+    score += (pinks * 2)
+    
+    # Filtro de Passividade
+    if d <= 2 and part < 0.35:
+        score -= 25
+    return round(score, 2)
+
+# --- INTEGRAÇÃO RIOT API (SEASON 2026) ---
+def sync_season_riot(nome, tag):
     try:
-        # 1. Conta (PUUID)
-        url_acc = f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{nome}/{tag}?api_key={riot_key}"
-        res_acc = requests.get(url_acc)
-        if res_acc.status_code != 200: return None, f"Erro Riot Account: {res_acc.status_code}"
-        puuid = res_acc.json()['puuid']
+        headers = {"X-Riot-Token": riot_key}
+        # 1. PUUID
+        acc = requests.get(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{nome}/{tag}", headers=headers).json()
+        puuid = acc['puuid']
         
-        # 2. Última Flex (Queue 440)
-        url_m = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&count=1&api_key={riot_key}"
-        res_m = requests.get(url_m)
-        match_id = res_m.json()[0]
+        # 2. Buscar IDs de partidas desde o início da Season (Queue 440 = Flex)
+        url_matches = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime={SEASON_START_TIMESTAMP}&queue=440&start=0&count=20"
+        match_ids = requests.get(url_matches, headers=headers).json()
         
-        # 3. Detalhes
-        url_d = f"https://americas.api.riotgames.com/lol/match/v5/matches/{match_id}?api_key={riot_key}"
-        d = requests.get(url_d).json()
-        p = next(i for i in d['info']['participants'] if i['puuid'] == puuid)
+        if not match_ids:
+            return [], "Nenhuma Flex encontrada na Season 2026."
+
+        novas_partidas = []
+        df_existente = pd.read_csv(FILE_DB)
         
-        return {
-            'vitoria': p['win'], 'k': p['kills'], 'd': p['deaths'], 'a': p['assists'],
-            'participacao': p['challenges'].get('killParticipation', 0),
-            'torres': p['turretKills'], 'dano': p['totalDamageDealtToChampions']
-        }, None
+        for m_id in match_ids:
+            # Pula se a partida já estiver no banco
+            if m_id in df_existente['MatchID'].values:
+                continue
+                
+            d = requests.get(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}", headers=headers).json()
+            p = next(i for i in d['info']['participants'] if i['puuid'] == puuid)
+            
+            minutos = d['info']['gameDuration'] / 60
+            sc = calcular_score_bravura(
+                p['win'], p['deaths'], p['challenges'].get('killParticipation', 0),
+                p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], minutos, p['visionWardsBoughtInGame']
+            )
+            
+            novas_partidas.append({
+                'MatchID': m_id,
+                'Data': datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%Y-%m-%d %H:%M'),
+                'Jogador': nome.upper(),
+                'Tipo': 'Flex',
+                'Vitoria': p['win'],
+                'Score': sc,
+                'K': p['kills'], 'D': p['deaths'], 'A': p['assists'],
+                'Part': p['challenges'].get('killParticipation', 0),
+                'Dano_Estruturas': p['damageDealtToBuildings'],
+                'DPM': p['totalDamageDealtToChampions'] / minutos,
+                'Pinks': p['visionWardsBoughtInGame']
+            })
+            
+        return novas_partidas, None
     except Exception as e:
         return None, str(e)
 
-# --- FÓRMULA DE SCORE ---
-def calcular_score(v, k, d, a, part, torres, dano):
-    score = 30 if v else -10
-    score += (part * 30) + (torres * 5) + (dano / 2000)
-    if d <= 1 and part < 0.30: score -= 20
-    return round(score, 2)
-
 # --- INTERFACE ---
-st.title("⚔️ Ranking LoL: Scanner de Prints & API")
+st.title("🛡️ Ranking de Bravura: Season 2026")
 
 with st.sidebar:
-    metodo = st.radio("Método de Entrada", ["IA Vision (Print)", "Riot API (Flex)"])
+    st.header("📥 Sincronização")
+    metodo = st.radio("Método:", ["Riot API (Season 2026)", "IA Vision (Print Custom)"])
     
-    if metodo == "IA Vision (Print)":
-        u_file = st.file_uploader("Suba o print das estatísticas", type=['png', 'jpg'])
-        if u_file:
-            img = Image.open(u_file)
-            if st.button("🔍 Escanear Print"):
-                with st.spinner("IA analisando todos os jogadores..."):
-                    prompt = "Analise este print de LoL e extraia os dados de TODOS os jogadores visíveis em um JSON: lista de objetos com {nome, vitoria(bool), k, d, a, participacao(float), torres, dano}. Retorne apenas JSON."
-                    response = model.generate_content([prompt, img])
-                    try:
-                        dados_todos = json.loads(response.text.replace('```json', '').replace('```', '').strip())
-                        st.session_state['dados_ocr'] = dados_todos
-                    except: st.error("Erro ao processar JSON da IA.")
-            
-            if 'dados_ocr' in st.session_state:
-                lista_nicks = [p['nome'] for p in st.session_state['dados_ocr']]
-                nick_selecionado = st.selectbox("Quem é você no print?", lista_nicks)
-                
-                if st.button("Confirmar e Salvar"):
-                    p = next(i for i in st.session_state['dados_ocr'] if i['nome'] == nick_selecionado)
-                    sc = calcular_score(p['vitoria'], p['k'], p['d'], p['a'], p['participacao'], p['torres'], p['dano'])
-                    
+    if metodo == "Riot API (Season 2026)":
+        r_nome = st.text_input("Nick")
+        r_tag = st.text_input("Tag")
+        if st.button("Puxar Dados da Season"):
+            with st.spinner("Buscando histórico da temporada..."):
+                partidas, erro = sync_season_riot(r_nome, r_tag)
+                if partidas:
                     df = pd.read_csv(FILE_DB)
-                    nova_linha = {'Data': pd.Timestamp.now(), 'Jogador': p['nome'].upper(), 'Tipo': 'Custom', 'Vitoria': p['vitoria'], 'Score': sc, 'K': p['k'], 'D': p['d'], 'A': p['a'], 'Part': p['participacao'], 'Torres': p['torres'], 'Dano': p['dano']}
-                    pd.concat([df, pd.DataFrame([nova_linha])], ignore_index=True).to_csv(FILE_DB, index=False)
-                    st.success(f"Salvo: {nick_selecionado} com {sc} pts!")
+                    df_novos = pd.DataFrame(partidas)
+                    pd.concat([df, df_novos], ignore_index=True).to_csv(FILE_DB, index=False)
+                    st.success(f"Foram adicionadas {len(partidas)} novas partidas!")
                     st.rerun()
+                elif erro: st.error(erro)
+                else: st.info("Tudo atualizado! Nenhuma partida nova encontrada.")
 
     else:
-        r_nome = st.text_input("Nick (Ex: Faker)")
-        r_tag = st.text_input("Tag (Ex: BR1)")
-        if st.button("Sincronizar Flex"):
-            d, erro = buscar_riot_flex(r_nome, r_tag)
-            if d:
-                sc = calcular_score(d['vitoria'], d['k'], d['d'], d['a'], d['participacao'], d['torres'], d['dano'])
-                df = pd.read_csv(FILE_DB)
-                nova_linha = {'Data': pd.Timestamp.now(), 'Jogador': r_nome.upper(), 'Tipo': 'Flex', 'Vitoria': d['vitoria'], 'Score': sc, 'K': d['k'], 'D': d['d'], 'A': d['a'], 'Part': d['participacao'], 'Torres': d['torres'], 'Dano': d['dano']}
-                pd.concat([df, pd.DataFrame([nova_linha])], ignore_index=True).to_csv(FILE_DB, index=False)
-                st.success(f"Flex sincronizada! Score: {sc}")
-                st.rerun()
-            else: st.error(f"Erro: {erro}")
+        # Módulo IA Vision (Simplificado para o código final)
+        u_file = st.file_uploader("Upload Print", type=['png', 'jpg'])
+        nick_ai = st.text_input("Nick no Print").upper()
+        if u_file and nick_ai and st.button("Analisar com IA"):
+            img = Image.open(u_file)
+            prompt = f"Analise o print de LoL para {nick_ai}. Extraia JSON: vitoria(bool), d(int), participacao(float), dano_estruturas(int), dano_campeoes(int), duracao_minutos(int), pinks(int)."
+            resp = model.generate_content([prompt, img])
+            dados = json.loads(resp.text.replace('```json', '').replace('```', '').strip())
+            sc = calcular_score_bravura(dados['vitoria'], dados['d'], dados['participacao'], dados['dano_estruturas'], dados['dano_campeoes'], dados['duracao_minutos'], dados['pinks'])
+            
+            df = pd.read_csv(FILE_DB)
+            nova = {'MatchID': f"custom_{os.urandom(4).hex()}", 'Data': datetime.now().strftime('%Y-%m-%d %H:%M'), 'Jogador': nick_ai, 'Tipo': 'Custom', 'Vitoria': dados['vitoria'], 'Score': sc, 'K': 0, 'D': dados['d'], 'A': 0, 'Part': dados['participacao'], 'Dano_Estruturas': dados['dano_estruturas'], 'DPM': dados['dano_campeoes']/dados['duracao_minutos'], 'Pinks': dados['pinks']}
+            pd.concat([df, pd.DataFrame([nova])], ignore_index=True).to_csv(FILE_DB, index=False)
+            st.rerun()
 
 # --- DASHBOARD ---
 df_view = pd.read_csv(FILE_DB)
 if not df_view.empty:
-    st.dataframe(df_view.sort_values('Score', ascending=False), use_container_width=True)
-    fig = px.line(df_view, x=df_view.index, y=df_view.groupby('Jogador')['Score'].cumsum(), color='Jogador', title="Evolução do Grupo")
+    st.subheader("🏆 Leaderboard da Temporada")
+    # Agregação por jogador
+    rank = df_view.groupby('Jogador').agg({
+        'Score': 'sum',
+        'DPM': 'mean',
+        'Dano_Estruturas': 'mean',
+        'MatchID': 'count'
+    }).rename(columns={'MatchID': 'Jogos'}).sort_values('Score', ascending=False)
+    
+    st.dataframe(rank.style.background_gradient(cmap='YlOrRd'), use_container_width=True)
+
+    st.subheader("📈 Curva de Bravura Acumulada")
+    df_view = df_view.sort_values('Data')
+    df_view['Acumulado'] = df_view.groupby('Jogador')['Score'].cumsum()
+    fig = px.line(df_view, x='Data', y='Acumulado', color='Jogador', markers=True, template="plotly_dark")
     st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Aguardando o primeiro sincronismo da Season 2026...")
