@@ -14,7 +14,7 @@ from urllib.parse import quote
 from typing import Optional
 
 # ==============================================================================
-# 0. SQUAD & MAPEAMENTO
+# 0. SQUAD LIST & MAPEAMENTO
 # ==============================================================================
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
@@ -31,43 +31,126 @@ SQUAD_LIST = [
     {"nick": "MEC Viper", "tag": "MEC"}
 ]
 
-NOME_DISPLAY = {"GUIZINHA": "GUIZA", "EZFALSE": "GUIZA", "GUIZA": "GUIZA"}
+# Unificação visual (Guiza)
+NOME_DISPLAY = {
+    "GUIZINHA": "GUIZA",
+    "EZFALSE": "GUIZA",
+    "GUIZA": "GUIZA"
+}
 
+# Sistema de Elos de Bravura (Baseado no Score)
 def get_elo_bravura(pontos):
-    if pontos < 100: return "🌑 Ferro de Barro"
+    if pontos < 150: return "🌑 Ferro de Barro"
     if pontos < 400: return "🥉 Bronze Ofensivo"
     if pontos < 800: return "🥈 Prata de Respeito"
     if pontos < 1300: return "🥇 Ouro de deidara"
     if pontos < 2000: return "💎 Platina Elite"
+    if pontos < 3000: return "🔥 Diamante de Sangue"
     return "🐉 DESAFIANTE HO"
 
 # ==============================================================================
-# 1. VISUAL (OFENSIVO SCORE)
+# 1. IDENTIDADE VISUAL (Estilo Cyberpunk/Gold Restaurado)
 # ==============================================================================
-st.set_page_config(page_title="OFENSIVO SCORE", layout="wide")
+st.set_page_config(page_title="OFENSIVO SCORE", layout="wide", page_icon="⚔️")
 
 st.markdown("""
 <style>
+    /* Fundo e Fontes */
     .stApp { background-color: #0e1117; }
+    h1, h2, h3 { font-family: 'Roboto', sans-serif; color: #ffffff; }
+    
+    /* Cards Dourados com Sombra (Visual Antigo) */
+    div[data-testid="metric-container"] {
+        background-color: #1a1c24;
+        border-left: 4px solid #c8aa6e;
+        padding: 15px;
+        border-radius: 6px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    }
+    
+    /* Medalhas */
+    .medal-box {
+        background: linear-gradient(145deg, #1e2328, #1a1c24);
+        border: 1px solid #c8aa6e;
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.6);
+        height: 100%;
+    }
+    .medal-icon { font-size: 3em; margin-bottom: 10px; }
+    .medal-title { color: #d4af37; font-weight: bold; font-size: 1.2em; text-transform: uppercase; }
+    .medal-player { color: #ff4b4b; font-weight: bold; font-size: 1.8em; margin: 10px 0; }
+    .medal-desc { color: #a0a0a0; font-style: italic; font-size: 0.9em; }
+
+    /* Footer e Títulos */
     .title-text { font-size: 3.5em; font-weight: bold; color: #ff4b4b; text-align: center; text-shadow: 2px 2px #000; }
-    .subtitle-text { font-size: 1.2em; font-style: italic; color: #a0a0a0; text-align: center; margin-bottom: 20px; }
-    div[data-testid="metric-container"] { 
-        background-color: #1a1c24; border-left: 4px solid #c8aa6e; padding: 15px; border-radius: 6px;
-    }
-    .medal-box { 
-        background: #1e2328; border: 1px solid #c8aa6e; padding: 20px; border-radius: 10px; text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-    }
+    .subtitle-text { font-size: 1.2em; font-style: italic; color: #a0a0a0; text-align: center; margin-bottom: 30px; }
+    .footer-group { font-size: 1.5em; color: #ffffff; text-align: left; margin-top: 50px; }
+    .footer-final { font-size: 4em; font-weight: bold; color: #d4af37; text-align: center; margin-top: 10px; font-family: 'Impact'; letter-spacing: 5px; }
+    
+    .stButton>button { background-color: #1e2328; color: #cdbe91; border: 1px solid #463714; font-weight: bold; width: 100%; }
+    .stButton>button:hover { border-color: #c8aa6e; color: #f0e6d2; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. MODELS & RIOT API
+# 2. CORE LOGIC
 # ==============================================================================
 class MatchStats(BaseModel):
     MatchID: str; Data: str; Timestamp: float; Jogador: str; Tipo: str; Vitoria: bool; Score: float
     K: int; D: int; A: int; Part: float; Dano_Estruturas: int; DPM: float; Pinks: int
-    RankRiot: Optional[str] = "Unranked"
+    RankRiot: Optional[str] = "Unranked" # Campo novo
+
+class BravuraEngine:
+    @staticmethod
+    def calculate_score(vitoria, d, part, dano_est, dano_camp, minutos, pinks):
+        score = 25.0 if vitoria else 0.0
+        score += (part * 40)
+        dpm = dano_camp / minutos if minutos > 0 else 0
+        score += (dpm / 100)
+        score += (dano_est / 500)
+        score += (pinks * 2)
+        if d <= 2 and part < 0.35: score -= 25.0
+        return round(score, 2)
+
+# ==============================================================================
+# 3. INFRASTRUCTURE
+# ==============================================================================
+class DatabaseAdapter:
+    FILE_DB = 'leaguestats_bravura.csv'
+    def __init__(self):
+        # Auto-correção de esquema (Migração)
+        if os.path.exists(self.FILE_DB):
+            try:
+                df = pd.read_csv(self.FILE_DB)
+                if 'RankRiot' not in df.columns:
+                    df['RankRiot'] = 'Unranked' # Adiciona coluna se faltar
+                    df.to_csv(self.FILE_DB, index=False)
+            except: pass
+        else:
+            pd.DataFrame(columns=MatchStats.model_fields.keys()).to_csv(self.FILE_DB, index=False)
+    
+    def get_all(self):
+        try:
+            df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
+            # Aplica o mapeamento do Guiza AQUI (Visualização)
+            df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(x.upper(), x.upper()))
+            return df
+        except: return pd.DataFrame()
+
+    def save(self, stats: MatchStats):
+        try:
+            df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
+            # Chave composta para evitar duplicidade mas permitir multicontas na mesma partida
+            if not ((df['MatchID'] == str(stats.MatchID)) & (df['Jogador'] == stats.Jogador.upper())).any():
+                pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
+                return True
+            return False
+        except: return False
+    
+    def reset_db(self):
+        if os.path.exists(self.FILE_DB): os.remove(self.FILE_DB)
 
 class RiotAdapter:
     def __init__(self, api_key):
@@ -77,6 +160,7 @@ class RiotAdapter:
         try:
             sid = requests.get(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}", headers=self.headers).json()['id']
             leagues = requests.get(f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{sid}", headers=self.headers).json()
+            # Filtra apenas fila FLEX
             flex = next((l for l in leagues if l['queueType'] == "RANKED_FLEX_SR"), None)
             return f"{flex['tier']} {flex['rank']}" if flex else "Unranked"
         except: return "Unranked"
@@ -86,6 +170,8 @@ class RiotAdapter:
             n, t = quote(nome.strip()), quote(tag.replace('#','').strip())
             acc = requests.get(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n}/{t}", headers=self.headers).json()
             puuid = acc['puuid']
+            
+            # Pega Rank Flex Atual
             rank_flex = self.fetch_flex_rank(puuid)
             
             m_ids = requests.get(f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime=1735689600&start=0&count={limit}", headers=self.headers).json()
@@ -94,95 +180,159 @@ class RiotAdapter:
                 d = requests.get(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}", headers=self.headers).json()
                 p = next(x for x in d['info']['participants'] if x['puuid'] == puuid)
                 mins = d['info']['gameDuration']/60
-                sc = (25.0 if p['win'] else 0.0) + (p['challenges'].get('killParticipation', 0) * 40) + ((p['totalDamageDealtToChampions']/mins)/100)
-                data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo='Flex' if d['info']['queueId']==440 else 'Outros', Vitoria=p['win'], Score=round(sc,2), K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 1), Pinks=p['visionWardsBoughtInGame'], RankRiot=rank_flex))
+                sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
+                
+                # Queue ID 440 = Flex
+                qid = d['info']['queueId']
+                tipo = 'Flex' if qid == 440 else ('SoloQ' if qid == 420 else 'Outros')
+                
+                data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo=tipo, Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 1), Pinks=p['visionWardsBoughtInGame'], RankRiot=rank_flex))
             return data, None
         except Exception as e: return None, str(e)
 
 # ==============================================================================
-# 3. RENDER DASHBOARD
+# 4. DASHBOARD UI
 # ==============================================================================
+def safe_hex_to_rgba(hex_color, opacity=0.1):
+    try:
+        c = hex_color.lstrip('#')
+        return f"rgba({int(c[0:2], 16)}, {int(c[2:4], 16)}, {int(c[4:6], 16)}, {opacity})"
+    except: return hex_color
+
 def render():
-    db_file = 'leaguestats_bravura.csv'
-    cols = list(MatchStats.model_fields.keys())
-    
-    # Proteção contra KeyError: Se o arquivo estiver errado, ele recria
-    if os.path.exists(db_file):
-        df_test = pd.read_csv(db_file)
-        if 'RankRiot' not in df_test.columns:
-            os.remove(db_file)
-    
-    if not os.path.exists(db_file):
-        pd.DataFrame(columns=cols).to_csv(db_file, index=False)
-    
+    db = DatabaseAdapter()
+    riot = RiotAdapter(st.secrets.get("RIOT_KEY", ""))
+    gemini = genai.GenerativeModel('models/gemini-1.5-flash') if st.secrets.get("GEMINI_KEY") else None
+
     st.markdown("<div class='title-text'>⚔️ OFENSIVO SCORE ⚔️</div>", unsafe_allow_html=True)
     st.markdown("<div class='subtitle-text'>criado para jogadores ofensivos que gostam de rir e vencer</div>", unsafe_allow_html=True)
 
-    riot = RiotAdapter(st.secrets.get("RIOT_KEY", ""))
-    
     with st.sidebar:
         st.header("🎮 deidara HO")
-        if st.button("🔄 ATUALIZAR SQUAD (FLEX)"):
-            df_old = pd.read_csv(db_file, dtype={'MatchID': str})
-            bar = st.progress(0)
-            for idx, p in enumerate(SQUAD_LIST):
-                bar.progress(idx/len(SQUAD_LIST), text=f"Lendo {p['nick']}...")
-                matches, _ = riot.fetch_matches(p['nick'], p['tag'])
-                if matches:
-                    for m in matches:
-                        if not ((df_old['MatchID'] == m.MatchID) & (df_old['Jogador'] == m.Jogador.upper())).any():
-                            df_old = pd.concat([df_old, pd.DataFrame([m.model_dump()])], ignore_index=True)
-            df_old.to_csv(db_file, index=False)
-            st.rerun()
+        modo = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
         
-        if st.button("🗑️ Resetar Tudo"):
-            os.remove(db_file)
+        st.markdown("---")
+        if modo == "Sincronizar Squad (API)":
+            if st.button("🔄 ATUALIZAR SQUAD"):
+                bar = st.progress(0, text="Iniciando...")
+                saved_count = 0
+                for idx, p in enumerate(SQUAD_LIST):
+                    bar.progress(idx/len(SQUAD_LIST), text=f"Buscando {p['nick']}...")
+                    matches, _ = riot.fetch_matches(p['nick'], p['tag'])
+                    if matches:
+                        for m in matches: 
+                            if db.save(m): saved_count += 1
+                    time.sleep(0.5)
+                st.success(f"Finalizado! +{saved_count} novas partidas.")
+                st.rerun()
+        else:
+            u_file = st.file_uploader("Upload Custom", type=['png','jpg'])
+            p_name = st.text_input("Nick no Print").upper()
+            if st.button("🤖 Analisar") and u_file and gemini:
+                try:
+                    prompt = f"Extraia stats LoL JSON para {p_name}: {{'vitoria':bool,'k':int,'d':int,'a':int,'part':float,'dano_est':int,'dano_camp':int,'min':int,'pinks':int}}"
+                    raw = json.loads(gemini.generate_content([prompt, Image.open(u_file)]).text.replace('```json', '').replace('```', '').strip())
+                    sc = BravuraEngine.calculate_score(raw['vitoria'], raw['d'], raw['part'], raw['dano_est'], raw['dano_camp'], raw['min'], raw['pinks'])
+                    m = MatchStats(MatchID=f"c_{int(time.time())}", Data=datetime.now().strftime('%d/%m'), Timestamp=time.time()*1000, Jogador=p_name, Tipo='Custom', Vitoria=raw['vitoria'], Score=sc, K=raw['k'], D=raw['d'], A=raw['a'], Part=raw['part'], Dano_Estruturas=raw['dano_est'], DPM=round(raw['dano_camp']/raw['min'], 1), Pinks=raw['pinks'], RankRiot="Custom")
+                    db.save(m)
+                    st.success("Custom Salva!")
+                    st.rerun()
+                except: st.error("Erro ao ler imagem.")
+
+        st.markdown("---")
+        if st.button("🗑️ Resetar Database"):
+            db.reset_db()
             st.rerun()
 
-    df = pd.read_csv(db_file, dtype={'MatchID': str})
-    df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(x.upper(), x.upper()))
-    
+    df = db.get_all()
     if df.empty:
-        st.info("Nenhum dado. Clique em atualizar na lateral!")
+        st.info("Base de dados vazia. Sincronize o Squad na barra lateral!")
         return
 
-    # Tabs
-    tab_r, tab_m = st.tabs(["🏆 RANKING & ELOS", "🏅 MURAL DE MEDALHAS"])
+    # Abas Principais
+    tab_rank, tab_medalhas, tab_custom = st.tabs(["🏆 RANKING GERAL", "🎖️ MURAL DE MEDALHAS", "👹 CUSTOMS"])
 
-    with tab_r:
+    with tab_rank:
         df_f = df[df['Tipo'] != 'Custom']
         if not df_f.empty:
-            leader = df_f.groupby('Jogador').agg({'Score': 'sum', 'RankRiot': 'last'}).sort_values('Score', ascending=False).reset_index()
-            leader['Elo Bravura'] = leader['Score'].apply(get_elo_bravura)
-            
-            st.dataframe(leader[['Jogador', 'Elo Bravura', 'Score', 'RankRiot']].style.background_gradient(cmap='YlOrRd', subset=['Score']), use_container_width=True)
-            
-            df_f = df_f.sort_values('Timestamp')
-            df_f['Acumulado'] = df_f.groupby('Jogador')['Score'].cumsum()
-            fig = px.line(df_f, x='Data', y='Acumulado', color='Jogador', template='plotly_dark')
-            fig.update_traces(line_shape='spline', fill='tozeroy')
-            st.plotly_chart(fig, use_container_width=True)
+            # Cards KPIs com Delta Verde (Visual Restaurado)
+            k1, k2, k3, k4 = st.columns(4)
+            top_player = df_f.groupby('Jogador')['Score'].sum().idxmax()
+            top_dmg = df_f.groupby('Jogador')['DPM'].mean().idxmax()
+            k1.metric("🔥 MVP Ofensivo", top_player, "Líder Supremo")
+            k2.metric("💀 Rei do Dano", top_dmg, f"Média: {df_f['DPM'].max():.0f}")
+            k3.metric("🎮 Partidas", len(df_f), "Analisadas")
+            k4.metric("📊 Score Médio", f"{df_f['Score'].mean():.1f}", "Global")
 
-    with tab_m:
+            st.markdown("---")
+            
+            # Tabela Leaderboard (Com Rank Riot e Elos HO)
+            c1, c2 = st.columns([1.2, 2])
+            with c1:
+                st.subheader("Leaderboard Comparativa")
+                leader = df_f.groupby('Jogador').agg({'Score': 'sum', 'RankRiot': 'last'}).sort_values('Score', ascending=False).reset_index()
+                leader['Elo HO'] = leader['Score'].apply(get_elo_bravura)
+                
+                # Exibe colunas selecionadas com gradiente
+                st.dataframe(
+                    leader[['Jogador', 'Elo HO', 'Score', 'RankRiot']].style.background_gradient(cmap='YlOrRd', subset=['Score']), 
+                    use_container_width=True, 
+                    height=450
+                )
+
+            # Gráfico Spline (Visual Restaurado)
+            with c2:
+                st.subheader("Evolução da Agressividade")
+                df_f = df_f.sort_values('Timestamp')
+                df_f['Acumulado'] = df_f.groupby('Jogador')['Score'].cumsum()
+                
+                fig = go.Figure()
+                colors = px.colors.qualitative.Pastel
+                for idx, player in enumerate(df_f['Jogador'].unique()):
+                    d_p = df_f[df_f['Jogador'] == player]
+                    color = colors[idx % len(colors)]
+                    fig.add_trace(go.Scatter(
+                        x=d_p['Data'], y=d_p['Acumulado'], name=player,
+                        mode='lines+markers', line=dict(shape='spline', width=3, color=color),
+                        fill='tozeroy', fillcolor=safe_hex_to_rgba(color, 0.1)
+                    ))
+                fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', hovermode="x unified", legend=dict(orientation="h", y=1.1))
+                st.plotly_chart(fig, use_container_width=True)
+
+    with tab_medalhas:
         df_f = df[df['Tipo'] != 'Custom']
         if not df_f.empty:
-            stats = df_f.groupby('Jogador').agg({'DPM': 'mean', 'Score': 'sum', 'D': 'sum', 'Part': 'mean', 'Vitoria': 'sum'})
+            st.subheader("Os Destaques (e Bagres) da Temporada")
             m1, m2, m3, m4 = st.columns(4)
             
-            with m1:
-                ariel = stats.sort_values(['Part', 'Vitoria'], ascending=[True, True]).index[0]
-                st.markdown(f"<div class='medal-box'>🐢<br><b>ARIEL</b><br><small>Safe Player</small><br><h2 style='color:#ff4b4b'>{ariel}</h2></div>", unsafe_allow_html=True)
-            with m2:
-                danudo = stats['DPM'].idxmax()
-                st.markdown(f"<div class='medal-box'>🧨<br><b>DANUDO</b><br><small>Maior Dano</small><br><h2 style='color:#c8aa6e'>{danudo}</h2></div>", unsafe_allow_html=True)
-            with m3:
-                diniz = stats['Score'].idxmax()
-                st.markdown(f"<div class='medal-box'>🔪<br><b>DINIZ</b><br><small>Mestre Bravura</small><br><h2 style='color:#c8aa6e'>{diniz}</h2></div>", unsafe_allow_html=True)
-            with m4:
-                inimigo = stats['D'].idxmax()
-                st.markdown(f"<div class='medal-box'>💀<br><b>INIMIGO KDA</b><br><small>Mais Mortes</small><br><h2 style='color:#ff4b4b'>{inimigo}</h2></div>", unsafe_allow_html=True)
+            # Lógica das Medalhas
+            agg = df_f.groupby('Jogador').agg({'DPM': 'mean', 'Score': 'sum', 'D': 'sum', 'Part': 'mean', 'Vitoria': 'sum'})
+            
+            with m1: # ARIEL (Menor part, Menos vitorias)
+                ariel = agg.sort_values(['Part', 'Vitoria'], ascending=[True, True]).index[0]
+                st.markdown(f"<div class='medal-box'><div class='medal-icon'>🐢</div><div class='medal-title'>MEDALHA ARIEL</div><div class='medal-player'>{ariel}</div><div class='medal-desc'>Safe Player • Baixa Participação</div></div>", unsafe_allow_html=True)
+            
+            with m2: # DANUDO (Maior Dano)
+                danudo = agg['DPM'].idxmax()
+                st.markdown(f"<div class='medal-box'><div class='medal-icon'>🧨</div><div class='medal-title'>MEDALHA DANUDO</div><div class='medal-player'>{danudo}</div><div class='medal-desc'>Maior Dano Médio</div></div>", unsafe_allow_html=True)
+            
+            with m3: # DINIZ (Maior Bravura)
+                diniz = agg['Score'].idxmax()
+                st.markdown(f"<div class='medal-box'><div class='medal-icon'>🔪</div><div class='medal-title'>MEDALHA DINIZ</div><div class='medal-player'>{diniz}</div><div class='medal-desc'>Ofensividade Pura</div></div>", unsafe_allow_html=True)
+            
+            with m4: # INIMIGO KDA (Mais Mortes)
+                inimigo = agg['D'].idxmax()
+                st.markdown(f"<div class='medal-box'><div class='medal-icon'>💀</div><div class='medal-title'>INIMIGO DO KDA</div><div class='medal-player'>{inimigo}</div><div class='medal-desc'>Morreu mais que viveu</div></div>", unsafe_allow_html=True)
 
-    st.markdown("<hr><div style='text-align:center'><div style='font-size:1.5em'>É o grupo</div><div style='font-size:4em; font-weight:bold; color:#d4af37; font-family:Impact'>deidara HO</div></div>", unsafe_allow_html=True)
+    with tab_custom:
+        df_c = df[df['Tipo'] == 'Custom']
+        if not df_c.empty:
+            st.dataframe(df_c.groupby('Jogador')['Score'].sum().sort_values(ascending=False).reset_index().style.background_gradient(cmap='Reds'), use_container_width=True)
+            st.table(df_c[['Data', 'Jogador', 'Score', 'Vitoria']].tail(10))
+        else:
+            st.info("Nenhuma partida Custom registrada. Suba um print na barra lateral!")
+
+    st.markdown("<hr><div class='footer-group'>É o grupo</div><div class='footer-final'>deidara HO</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     render()
