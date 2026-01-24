@@ -30,7 +30,6 @@ SQUAD_LIST = [
     {"nick": "MEC Viper", "tag": "MEC"}
 ]
 
-# Unificação de Contas (Visual)
 NOME_DISPLAY = {
     "GUIZINHA": "GUIZA",
     "EZFALSE": "GUIZA",
@@ -40,7 +39,7 @@ NOME_DISPLAY = {
 st.set_page_config(page_title="OFENSIVO SCORE", layout="wide", page_icon="⚔️")
 
 # ==============================================================================
-# 1. IDENTIDADE VISUAL (Sua preferida)
+# 1. IDENTIDADE VISUAL
 # ==============================================================================
 st.markdown("""
 <style>
@@ -98,7 +97,6 @@ class DatabaseAdapter:
     def get_all(self):
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
-            # Aplica unificação apenas na leitura visual
             df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(x.upper(), x.upper()))
             return df
         except: return pd.DataFrame()
@@ -106,11 +104,11 @@ class DatabaseAdapter:
     def save(self, stats: MatchStats):
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
-            # Evita duplicidade exata
+            # VERIFICAÇÃO DE DUPLICIDADE
             if not ((df['MatchID'] == str(stats.MatchID)) & (df['Jogador'] == stats.Jogador.upper())).any():
                 pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
-                return True
-            return False
+                return True # Salvou novo
+            return False # Já existia
         except: return False
     
     def reset_database(self):
@@ -121,46 +119,43 @@ class DatabaseAdapter:
 class RiotAdapter:
     def __init__(self, api_key):
         self.headers = {"X-Riot-Token": api_key}
-        self.season_start = 1735689600 # 2026
+        self.season_start = 1735689600 # 01/01/2026
 
-    # --- O SEGREDO DO SUCESSO: REQUEST BLINDADO ---
+    # --- REQUEST BLINDADO V2 ---
     def request_blindado(self, url):
-        """Tenta fazer a requisição. Se der 429, espera o tempo necessário."""
+        """Tenta até conseguir, respeitando o 429."""
         while True:
             resp = requests.get(url, headers=self.headers)
-            
             if resp.status_code == 200:
                 return resp.json()
-            
             elif resp.status_code == 429:
-                # Pega o tempo que a Riot mandou esperar (Retry-After)
-                wait_time = int(resp.headers.get("Retry-After", 60))
-                # Aviso visual para o usuário não achar que travou
-                st.toast(f"🛑 Limite da Riot atingido! Aguardando {wait_time} segundos...", icon="⏳")
-                time.sleep(wait_time + 1) # Espera +1s de segurança
-                continue # Tenta de novo
-            
+                wait = int(resp.headers.get("Retry-After", 10))
+                st.toast(f"⏳ Riot pediu pausa de {wait}s...", icon="🛑")
+                time.sleep(wait + 1)
+                continue
+            elif resp.status_code == 404:
+                return None # Não achou
             else:
-                # Erro real (404, 403, etc)
-                return None
+                return None # Outro erro
 
-    def fetch_matches(self, nome, tag, limit=15):
+    def fetch_matches(self, nome, tag, limit=80): # AUMENTEI PARA 80
         try:
             nome_enc, tag_enc = quote(nome.strip()), quote(tag.replace('#','').strip())
             
             # 1. Conta
             acc = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{nome_enc}/{tag_enc}")
-            if not acc: return None, "Erro ao buscar Conta/Nick"
-            
+            if not acc: return None, "Conta não encontrada"
             puuid = acc['puuid']
 
-            # 2. Lista de IDs
-            m_ids = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime={self.season_start}&start=0&count={limit}")
+            # 2. Lista IDs (Busca Profunda)
+            # count=limit garante que buscamos até 80 partidas para trás a partir de 2026
+            url_ids = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime={self.season_start}&start=0&count={limit}"
+            m_ids = self.request_blindado(url_ids)
+            
             if not m_ids: return [], None
             
             data = []
             for m_id in m_ids:
-                # 3. Detalhes (Blindado)
                 d = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}")
                 
                 if d:
@@ -172,15 +167,14 @@ class RiotAdapter:
                         tipo = 'Flex' if qid == 440 else ('SoloQ' if qid == 420 else 'Outros')
                         data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%Y-%m-%d %H:%M'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo=tipo, Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 2), Pinks=p['visionWardsBoughtInGame']))
                 
-                # Pequena pausa ética para não forçar o 429 toda hora
-                time.sleep(0.5)
+                time.sleep(0.3) # Delay mínimo para fluidez
             
             return data, None
             
         except Exception as e: return None, str(e)
 
 # ==============================================================================
-# 4. DASHBOARD UI
+# 4. UI LAYER
 # ==============================================================================
 def safe_hex_to_rgba(hex_color, opacity=0.1):
     try:
@@ -203,41 +197,40 @@ def render():
         st.markdown("---")
         
         if acao == "Sincronizar Squad (API)":
-            if st.button("🔄 ATUALIZAR LISTA COMPLETA"):
-                # Barra de Progresso Real
-                bar = st.progress(0, text="Iniciando motor de busca blindado...")
-                log_box = st.empty()
-                total_salvo_geral = 0
-                
-                total_jogadores = len(SQUAD_LIST)
+            if st.button("🔄 BUSCA PROFUNDA (80 PARTIDAS)"):
+                bar = st.progress(0, text="Iniciando varredura profunda...")
+                status_log = st.empty()
+                total_novos = 0
                 
                 for idx, p in enumerate(SQUAD_LIST):
-                    display_name = f"{p['nick']} ({idx+1}/{total_jogadores})"
-                    bar.progress(idx / total_jogadores, text=f"Lendo: {display_name}...")
+                    bar.progress(idx / len(SQUAD_LIST), text=f"Lendo: {p['nick']} (Buscando em todo 2026)...")
                     
-                    matches, err = riot.fetch_matches(p['nick'], p['tag'])
+                    matches, err = riot.fetch_matches(p['nick'], p['tag'], limit=80) # BUSCA PROFUNDA
                     
                     if matches:
-                        novos = 0
+                        p_novos = 0
                         for m in matches:
-                            if db.save(m): novos += 1
-                        total_salvo_geral += novos
-                        if novos > 0:
-                            st.toast(f"✅ {p['nick']}: +{novos} jogos salvos!", icon="💾")
+                            if db.save(m): p_novos += 1
+                        
+                        total_novos += p_novos
+                        if p_novos > 0:
+                            st.toast(f"✅ {p['nick']}: Encontrei +{p_novos} jogos antigos/novos!", icon="💾")
+                        else:
+                            # Isso aqui confirma pro usuário que o robô trabalhou mas não achou nada novo
+                            print(f"{p['nick']}: 0 novos (Tudo atualizado)")
+                            
                     elif err:
-                        st.toast(f"⚠️ {p['nick']}: {err}", icon="⚠️")
+                        st.toast(f"⚠️ {p['nick']}: {err}")
                     
-                    # Atualiza o log visual na sidebar
-                    log_box.text(f"Último processado: {p['nick']}")
-                
-                bar.progress(1.0, text="Processo Finalizado!")
-                
-                if total_salvo_geral > 0:
-                    st.success(f"Sucesso Total! +{total_salvo_geral} novas partidas no histórico.")
+                    time.sleep(1)
+
+                bar.progress(1.0, text="Finalizado!")
+                if total_novos > 0:
+                    st.success(f"Banco de dados atualizado! +{total_novos} partidas adicionadas.")
                     time.sleep(3)
                     st.rerun()
                 else:
-                    st.info("Nenhuma partida nova encontrada (os dados já estavam atualizados).")
+                    st.info("Varredura completa. Nenhuma partida nova encontrada em 2026.")
 
         else:
             file = st.file_uploader("Upload Print", type=['png','jpg'])
@@ -260,7 +253,7 @@ def render():
 
     df = db.get_all()
     if df.empty:
-        st.info("Banco de dados vazio. Clique em Atualizar Lista Completa.")
+        st.info("Base vazia. Execute a Busca Profunda.")
         return
 
     tab_f, tab_c = st.tabs(["🏆 OFICIAIS (API)", "👹 CUSTOMS (PRINTS)"])
@@ -269,11 +262,11 @@ def render():
         df_f = df[df['Tipo'] != 'Custom']
         if not df_f.empty:
             k1, k2, k3, k4 = st.columns(4)
-            jogos_recentes = len(df_f[df_f['Timestamp'] > (time.time()*1000 - 86400000)])
+            jogos_hoje = len(df_f[df_f['Timestamp'] > (time.time()*1000 - 86400000)])
             
             k1.metric("🔥 MVP Ofensivo", df_f.groupby('Jogador')['Score'].sum().idxmax(), "Líder")
             k2.metric("💀 Rei do Dano", df_f.groupby('Jogador')['DPM'].mean().idxmax(), f"{df_f['DPM'].max():.0f} Max")
-            k3.metric("🎮 Jogos", len(df_f), f"+{jogos_recentes} Hoje")
+            k3.metric("🎮 Jogos", len(df_f), f"+{jogos_hoje} Hoje")
             k4.metric("📈 Média Score", f"{df_f['Score'].mean():.1f}", "Global")
             
             st.markdown("---")
@@ -302,7 +295,6 @@ def render():
             st.subheader("Leaderboard Customs")
             rank_c = df_c.groupby('Jogador')['Score'].sum().sort_values(ascending=False).reset_index()
             st.dataframe(rank_c.style.background_gradient(cmap='Reds', subset=['Score']), use_container_width=True)
-            st.subheader("Histórico de Resenha")
             st.table(df_c[['Data', 'Jogador', 'Score', 'Vitoria']].tail(10))
 
     st.markdown("<hr><div class='footer-group'>É o grupo</div><div class='footer-final'>deidara HO</div>", unsafe_allow_html=True)
