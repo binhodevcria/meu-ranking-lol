@@ -215,6 +215,16 @@ class GeminiAdapter:
 # ==============================================================================
 # 3. UI LAYER (Interface Gráfica)
 # ==============================================================================
+
+# Função auxiliar segura para converter cor hex para RGBA
+def safe_hex_to_rgba(hex_color, opacity=0.1):
+    try:
+        c = hex_color.lstrip('#')
+        return f"rgba({int(c[0:2], 16)}, {int(c[2:4], 16)}, {int(c[4:6], 16)}, {opacity})"
+    except:
+        # Retorna a cor original se falhar a conversão (fallback seguro)
+        return hex_color
+
 def render_dashboard():
     db = DatabaseAdapter()
     riot = RiotAdapter(st.secrets.get("RIOT_KEY"))
@@ -336,13 +346,16 @@ def render_dashboard():
                     d_p = df_filter[df_filter['Jogador'] == player]
                     color = colors[i % len(colors)]
                     
+                    # Correção do Erro: Usa função segura para converter cor
+                    fill_color_rgba = safe_hex_to_rgba(color, 0.1)
+
                     fig.add_trace(go.Scatter(
                         x=d_p['Data'], y=d_p['Acumulado'],
                         name=player,
                         mode='lines+markers',
                         line=dict(shape='spline', width=3, color=color),
                         fill='tozeroy', # Efeito de área preenchida
-                        fillcolor=f"rgba{str(tuple(int(color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (0.1,))}"
+                        fillcolor=fill_color_rgba
                     ))
                 
                 fig.update_layout(
