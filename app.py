@@ -15,8 +15,11 @@ from urllib.parse import quote
 from typing import Optional
 
 # ==============================================================================
-# 0. SQUAD LIST
+# 0. SQUAD LIST & CONFIGURAÇÕES
 # ==============================================================================
+# Define o tamanho do lote de atualização (Rápido e constante)
+BATCH_SIZE = 20 
+
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
     {"nick": "Naguinha", "tag": "INTEN"},
@@ -48,23 +51,36 @@ st.markdown("""
 <style>
     .stApp { background-color: #0e1117; }
     h1, h2, h3 { font-family: 'Roboto', sans-serif; color: #ffffff; }
-    div[data-testid="metric-container"] { background-color: #1a1c24; border-left: 4px solid #c8aa6e; padding: 15px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
-    .medal-box { background: linear-gradient(145deg, #1e2328, #1a1c24); border: 1px solid #c8aa6e; padding: 15px; border-radius: 10px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.6); height: 100%; }
-    .medal-icon { font-size: 3em; margin-bottom: 5px; }
-    .medal-title { color: #d4af37; font-weight: bold; font-size: 1.1em; text-transform: uppercase; }
-    .medal-player { color: #ff4b4b; font-weight: bold; font-size: 1.6em; margin: 5px 0; }
-    .medal-desc { color: #a0a0a0; font-style: italic; font-size: 0.85em; display: block; }
+    
+    /* Cards de KPI */
+    div[data-testid="metric-container"] {
+        background-color: #1a1c24; border-left: 4px solid #c8aa6e;
+        padding: 15px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    }
+    
+    /* Medalhas */
+    .medal-box {
+        background: linear-gradient(145deg, #1e2328, #1a1c24); border: 1px solid #c8aa6e;
+        padding: 15px; border-radius: 10px; text-align: center;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.6); height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center;
+    }
+    .medal-icon { font-size: 3.5em; margin-bottom: 5px; }
+    .medal-title { color: #d4af37; font-weight: bold; font-size: 1.2em; text-transform: uppercase; margin: 0; }
+    .medal-player { color: #ff4b4b; font-weight: bold; font-size: 1.5em; margin: 5px 0; }
+    .medal-desc { color: #a0a0a0; font-style: italic; font-size: 0.9em; }
+
     .title-text { font-size: 3.5em; font-weight: bold; color: #ff4b4b; text-align: center; text-shadow: 2px 2px #000; }
     .subtitle-text { font-size: 1.2em; font-style: italic; color: #a0a0a0; text-align: center; margin-bottom: 30px; }
     .footer-group { font-size: 1.5em; color: #ffffff; text-align: left; margin-top: 50px; }
     .footer-final { font-size: 4em; font-weight: bold; color: #d4af37; text-align: center; margin-top: 10px; font-family: 'Impact'; letter-spacing: 5px; }
+    
     .stButton>button { background-color: #1e2328; color: #cdbe91; border: 1px solid #463714; font-weight: bold; width: 100%; }
     .stButton>button:hover { border-color: #c8aa6e; color: #f0e6d2; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. LÓGICA
+# 2. LÓGICA DE NEGÓCIO
 # ==============================================================================
 class MatchStats(BaseModel):
     MatchID: str; Data: str; Timestamp: float; Jogador: str; Tipo: str
@@ -119,6 +135,9 @@ class DatabaseAdapter:
     def save(self, stats: MatchStats):
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
+            # LÓGICA DE ACÚMULO:
+            # Verifica se essa partida (ID) para esse jogador JÁ EXISTE.
+            # Se não existir, salva. Se existir, ignora.
             if not ((df['MatchID'] == str(stats.MatchID)) & (df['Jogador'] == stats.Jogador.upper())).any():
                 pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
                 return True
@@ -133,14 +152,14 @@ class DatabaseAdapter:
 class RiotAdapter:
     def __init__(self, api_key):
         self.headers = {"X-Riot-Token": api_key}
-        self.season_start = 1735689600 # 01/01/2026
+        self.season_start = 1735689600 # 2026
 
     def request_blindado(self, url):
         for i in range(3):
             resp = requests.get(url, headers=self.headers)
             if resp.status_code == 200: return resp.json()
             elif resp.status_code == 429:
-                wait = int(resp.headers.get("Retry-After", 10))
+                wait = int(resp.headers.get("Retry-After", 5))
                 time.sleep(wait + 1)
                 continue
             elif resp.status_code == 404: return None
@@ -148,6 +167,7 @@ class RiotAdapter:
         return None
 
     def fetch_rank(self, puuid):
+        # Tenta buscar o Elo Flex na API BR1
         try:
             summ = self.request_blindado(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}")
             if not summ: return "Unranked"
@@ -158,52 +178,39 @@ class RiotAdapter:
             return "Unranked"
         except: return "Unranked"
 
-    def fetch_matches_paginated(self, nome, tag):
+    def fetch_latest_flex_batch(self, nome, tag):
         try:
             n, t = quote(nome.strip()), quote(tag.replace('#','').strip())
             acc = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n}/{t}")
-            if not acc: return None, 0, 0, "Conta não achada"
+            if not acc: return None, 0, "Conta não encontrada"
             puuid = acc['puuid']
             
+            # 1. Pega Elo Atualizado
             rank_atual = self.fetch_rank(puuid)
+
+            # 2. Busca as ÚLTIMAS 20 partidas FLEX (queue=440)
+            # Isso é rápido e eficiente. Se tiver partidas novas, elas estarão aqui.
+            url_ids = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={self.season_start}&start=0&count={BATCH_SIZE}"
             
-            # --- PAGINAÇÃO INFINITA (VARREDURA TOTAL 2026) ---
+            m_ids = self.request_blindado(url_ids)
+            if not m_ids: return [], 0, "Sem Flex Recente"
+            
             data = []
-            flex_collected = 0
-            total_scanned = 0
-            start_index = 0
-            batch_size = 100
             
-            while True:
-                # Busca em lotes de 100
-                url_ids = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime={self.season_start}&start={start_index}&count={batch_size}"
-                m_ids = self.request_blindado(url_ids)
+            for m_id in m_ids:
+                d = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}")
+                if d:
+                    p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
+                    if p:
+                        mins = d['info']['gameDuration']/60
+                        sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
+                        data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo='Flex', Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 2), Pinks=p['visionWardsBoughtInGame'], RankRiot=rank_atual))
                 
-                # Se a lista vier vazia, acabaram os jogos de 2026
-                if not m_ids:
-                    break
-                
-                total_scanned += len(m_ids)
-                
-                for m_id in m_ids:
-                    d = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}")
-                    if d:
-                        # FILTRO: Só Flex (440)
-                        if d['info']['queueId'] == 440:
-                            p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
-                            if p:
-                                mins = d['info']['gameDuration']/60
-                                sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
-                                data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo='Flex', Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 2), Pinks=p['visionWardsBoughtInGame'], RankRiot=rank_atual))
-                                flex_collected += 1
-                    time.sleep(0.05) # Delay mínimo
-                
-                start_index += batch_size # Prepara próximo lote
-                time.sleep(0.5) # Respiro entre lotes
+                time.sleep(0.1) 
             
-            return data, flex_collected, total_scanned, "OK"
+            return data, len(data), "OK"
             
-        except Exception as e: return None, 0, 0, str(e)
+        except Exception as e: return None, 0, str(e)
 
 # ==============================================================================
 # 4. RENDER
@@ -221,34 +228,39 @@ def render():
         acao = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
         
         if acao == "Sincronizar Squad (API)":
-            if st.button("🔄 ATUALIZAR (VARREDURA TOTAL)"):
-                status_log = st.status("Iniciando varredura completa de 2026...", expanded=True)
-                total_salvo = 0
+            if st.button(f"🔄 Sincronizar (Últimas {BATCH_SIZE})"):
+                status_log = st.status(f"Buscando as {BATCH_SIZE} últimas Flex de cada um...", expanded=True)
+                total_novos = 0
                 
                 for idx, p in enumerate(SQUAD_LIST):
-                    status_log.write(f"🔎 Analisando **{p['nick']}** (Paginando histórico)...")
+                    status_log.write(f"🔎 **{p['nick']}**: Verificando...")
                     
-                    matches, c, scanned, msg = riot.fetch_matches_paginated(p['nick'], p['tag'])
+                    matches, total_fetched, msg = riot.fetch_latest_flex_batch(p['nick'], p['tag'])
                     
                     if matches is not None:
-                        saved = 0
+                        saved_count = 0
                         for m in matches: 
-                            if db.save(m): saved += 1
-                        total_salvo += saved
+                            if db.save(m): saved_count += 1 # Só incrementa se for NOVO no banco
                         
-                        if saved > 0: status_log.write(f"✅ {p['nick']}: +{saved} Flex novas (de {scanned} analisadas)!")
-                        else: status_log.write(f"💤 {p['nick']}: Tudo atualizado ({c} Flex totais).")
+                        total_novos += saved_count
+                        
+                        if saved_count > 0:
+                            status_log.write(f"✅ {p['nick']}: +{saved_count} novas partidas salvas!")
+                        else:
+                            status_log.write(f"💤 {p['nick']}: Nenhuma novidade.")
                     else:
                         status_log.error(f"❌ {p['nick']}: {msg}")
                     
-                    time.sleep(0.5)
+                    time.sleep(0.3)
                 
-                status_log.update(label="Varredura Finalizada!", state="complete", expanded=False)
-                if total_salvo > 0:
-                    st.success(f"Banco de dados atualizado com +{total_salvo} partidas.")
+                status_log.update(label="Sincronização Finalizada!", state="complete", expanded=False)
+                
+                if total_novos > 0:
+                    st.success(f"Sucesso! {total_novos} novas partidas adicionadas ao histórico.")
                     time.sleep(2)
                     st.rerun()
-                else: st.info("Nenhuma partida nova encontrada no histórico de 2026.")
+                else:
+                    st.info("O banco de dados já está atualizado com as últimas partidas.")
 
         else:
             file = st.file_uploader("Upload Print", type=['png','jpg'])
@@ -262,7 +274,7 @@ def render():
                     db.save(m)
                     st.success("Salvo!")
                     st.rerun()
-                except: st.error("Erro no print.")
+                except: st.error("Erro na leitura.")
 
         st.markdown("---")
         if st.button("🗑️ Resetar Database"):
@@ -273,13 +285,15 @@ def render():
     todos = sorted(list(set(NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper()) for p in SQUAD_LIST)))
     df_f = df[df['Tipo'] != 'Custom'] if not df.empty else pd.DataFrame()
 
+    # ABAS
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🏆 RANKING", "🎖️ MEDALHAS", "📊 TRANSPARÊNCIA", "⚖️ ELOS", "⚓ AFUNDAMENTO", "🚪 QUEM SAI?", "👹 CUSTOMS"])
 
     with t1:
         if not df_f.empty:
             k1, k2, k3, k4 = st.columns(4)
             mvp_name = df_f.groupby('Jogador')['Score'].mean().idxmax()
-            k1.metric("🔥 MVP (Média)", mvp_name, f"{df_f.groupby('Jogador')['Score'].mean().max():.1f}")
+            mvp_val = df_f.groupby('Jogador')['Score'].mean().max()
+            k1.metric("🔥 MVP (Média)", mvp_name, f"{mvp_val:.1f}")
             k2.metric("💀 Rei do Dano", df_f.groupby('Jogador')['DPM'].mean().idxmax(), f"{df_f['DPM'].max():.0f}")
             k3.metric("🎮 Flex Games", len(df_f))
             k4.metric("📈 Média Squad", f"{df_f['Score'].mean():.1f}")
@@ -303,38 +317,37 @@ def render():
         if not df_f.empty:
             m1, m2, m3, m4 = st.columns(4)
             agg = df_f.groupby('Jogador').agg({'DPM': 'mean', 'Score': 'sum', 'D': 'sum', 'Part': 'mean', 'Vitoria': 'sum'})
-            with m1: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🐢</div><div class='medal-title'>ARIEL</div><div class='medal-player'>{agg.sort_values(['Part', 'Vitoria']).index[0]}</div><small class='medal-desc'>Safe Player</small></div>", unsafe_allow_html=True)
-            with m2: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🧨</div><div class='medal-title'>DANUDO</div><div class='medal-player'>{agg['DPM'].idxmax()}</div><small class='medal-desc'>Maior Dano</small></div>", unsafe_allow_html=True)
-            with m3: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🔪</div><div class='medal-title'>DINIZ</div><div class='medal-player'>{agg['Score'].idxmax()}</div><small class='medal-desc'>Mestre Bravura (Soma)</small></div>", unsafe_allow_html=True)
-            with m4: st.markdown(f"<div class='medal-box'><div class='medal-icon'>💀</div><div class='medal-title'>INIMIGO KDA</div><div class='medal-player'>{agg['D'].idxmax()}</div><small class='medal-desc'>Feeder Oficial</small></div>", unsafe_allow_html=True)
+            with m1: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🐢</div><div class='medal-title'>ARIEL</div><div class='medal-player'>{agg.sort_values(['Part', 'Vitoria']).index[0]}</div><span class='medal-desc'>Mais Safe (Menor KP)</span></div>", unsafe_allow_html=True)
+            with m2: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🧨</div><div class='medal-title'>DANUDO</div><div class='medal-player'>{agg['DPM'].idxmax()}</div><span class='medal-desc'>Maior Dano Médio</span></div>", unsafe_allow_html=True)
+            with m3: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🔪</div><div class='medal-title'>DINIZ</div><div class='medal-player'>{agg['Score'].idxmax()}</div><span class='medal-desc'>Maior Soma de Pontos</span></div>", unsafe_allow_html=True)
+            with m4: st.markdown(f"<div class='medal-box'><div class='medal-icon'>💀</div><div class='medal-title'>INIMIGO KDA</div><div class='medal-player'>{agg['D'].idxmax()}</div><span class='medal-desc'>Quem mais morreu</span></div>", unsafe_allow_html=True)
 
     with t3:
         if not df_f.empty:
-            st.subheader("📊 Auditoria Detalhada (Pontos na Média)")
+            st.subheader("📊 Raio-X da Pontuação (Médias por Partida)")
             df_audit = df_f.copy()
-            df_audit['Pts_KP(40)'] = df_audit['Part'] * 40
-            df_audit['Pts_DPM(/100)'] = df_audit['DPM'] / 100
-            df_audit['Pts_Torre(/500)'] = df_audit['Dano_Estruturas'] / 500
-            df_audit['Pts_Visao'] = df_audit['Pinks']
-            df_audit['Penal_Medo'] = np.where((df_audit['D'] <= 2) & (df_audit['Part'] < 0.35), -25, 0)
+            # Mostra o valor calculado pelos pesos
+            df_audit['Pts_KP (+40)'] = df_audit['Part'] * 40
+            df_audit['Pts_DPM (/100)'] = df_audit['DPM'] / 100
+            df_audit['Pts_Torre (/500)'] = df_audit['Dano_Estruturas'] / 500
+            df_audit['Pts_Visao (x1)'] = df_audit['Pinks']
+            df_audit['Penal_Medo (-25)'] = np.where((df_audit['D'] <= 2) & (df_audit['Part'] < 0.35), -25, 0)
             
             audit = df_audit.groupby('Jogador').agg({
-                'Score': 'mean', 'Pts_KP(40)': 'mean', 'Pts_DPM(/100)': 'mean', 
-                'Pts_Torre(/500)': 'mean', 'Pts_Visao': 'mean', 'Penal_Medo': 'mean'
+                'Score': 'mean', 'Pts_KP (+40)': 'mean', 'Pts_DPM (/100)': 'mean', 
+                'Pts_Torre (/500)': 'mean', 'Pts_Visao (x1)': 'mean', 'Penal_Medo (-25)': 'mean'
             }).round(2).sort_values('Score', ascending=False)
             st.dataframe(audit, use_container_width=True)
 
     with t4:
         if not df_f.empty:
-            # Pega último Elo Válido
             elo = df_f[df_f['RankRiot'] != 'Unranked'].sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
-            # Completa com quem só tem Unranked
             elo_all = df_f.sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
             elo_all.update(elo)
             
             media = df_f.groupby('Jogador')['Score'].mean()
-            comp = pd.DataFrame({'Riot Flex': elo_all['RankRiot'], 'Score Médio': media})
-            comp['Rank Deidara'] = comp['Score Médio'].apply(get_rank_bravura)
+            comp = pd.DataFrame({'Riot Flex (Real)': elo_all['RankRiot'], 'Score Médio': media})
+            comp['Rank Deidara (Nosso)'] = comp['Score Médio'].apply(get_rank_bravura)
             st.dataframe(comp.sort_values('Score Médio', ascending=False), use_container_width=True)
 
     with t5:
@@ -344,18 +357,19 @@ def render():
             df_sq = df_f[df_f['MatchID'].isin(squad_matches)]
             
             if not df_sq.empty:
+                # Filtro de equilíbrio: Mínimo 5 jogos para não distorcer a %
                 counts = df_sq['Jogador'].value_counts()
-                # Filtra apenas quem tem 5+ partidas em grupo
                 validos = counts[counts >= 5].index.tolist()
                 df_bal = df_sq[df_sq['Jogador'].isin(validos)]
                 
                 if not df_bal.empty:
                     wr = df_bal.groupby('Jogador')['Vitoria'].mean()
-                    lr = ((1 - wr) * 100).reset_index(name='Taxa Derrota (%)').sort_values('Taxa Derrota (%)', ascending=False)
-                    st.plotly_chart(px.bar(lr, x='Jogador', y='Taxa Derrota (%)', color='Taxa Derrota (%)', template='plotly_dark', color_continuous_scale='Reds'), use_container_width=True)
-                    st.caption("Considerando apenas jogadores com 5+ jogos em grupo.")
-                else: st.info("Nenhum jogador atingiu 5 jogos em grupo.")
-            else: st.info("Sem jogos de grupo registrados.")
+                    # Taxa de Derrota = 1 - Winrate
+                    lr = ((1 - wr) * 100).reset_index(name='Taxa de Derrota (%)').sort_values('Taxa de Derrota (%)', ascending=False)
+                    st.plotly_chart(px.bar(lr, x='Jogador', y='Taxa de Derrota (%)', color='Taxa de Derrota (%)', template='plotly_dark', color_continuous_scale='Reds'), use_container_width=True)
+                    st.caption("Gráfico mostra a % de jogos perdidos quando em grupo (mín. 5 partidas).")
+                else: st.info("Calibrando... Nenhum jogador atingiu 5 partidas em grupo ainda.")
+            else: st.info("Nenhuma partida com 3+ membros do grupo foi registrada.")
 
     with t6:
         if not df_f.empty:
