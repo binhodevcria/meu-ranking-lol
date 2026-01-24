@@ -14,7 +14,7 @@ from urllib.parse import quote
 from typing import Optional
 
 # ==============================================================================
-# 0. SQUAD LIST (12 Jogadores)
+# 0. CONFIGURAÇÃO SQUAD & MAPEAMENTO
 # ==============================================================================
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
@@ -31,8 +31,14 @@ SQUAD_LIST = [
     {"nick": "MEC Viper", "tag": "MEC"}
 ]
 
-NOME_DISPLAY = {"GUIZINHA": "GUIZA", "EZFALSE": "GUIZA", "GUIZA": "GUIZA"}
+# Unificação das contas do Guiza
+NOME_DISPLAY = {
+    "GUIZINHA": "GUIZA",
+    "EZFALSE": "GUIZA",
+    "GUIZA": "GUIZA"
+}
 
+# Sistema de Elos de Bravura (Baseado no Score)
 def get_elo_bravura(pontos):
     if pontos < 150: return "🌑 Ferro de Barro"
     if pontos < 400: return "🥉 Bronze Ofensivo"
@@ -43,7 +49,7 @@ def get_elo_bravura(pontos):
     return "🐉 DESAFIANTE HO"
 
 # ==============================================================================
-# 1. VISUAL
+# 1. IDENTIDADE VISUAL (Visual Restaurado + Medalhas)
 # ==============================================================================
 st.set_page_config(page_title="OFENSIVO SCORE", layout="wide", page_icon="⚔️")
 
@@ -52,20 +58,31 @@ st.markdown("""
     .stApp { background-color: #0e1117; }
     h1, h2, h3 { font-family: 'Roboto', sans-serif; color: #ffffff; }
     
+    /* Cards Dourados com Sombra */
     div[data-testid="metric-container"] {
-        background-color: #1a1c24; border-left: 4px solid #c8aa6e;
-        padding: 15px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        background-color: #1a1c24;
+        border-left: 4px solid #c8aa6e;
+        padding: 15px;
+        border-radius: 6px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.5);
     }
+    
+    /* Medalhas (Adicionado de volta) */
     .medal-box {
-        background: linear-gradient(145deg, #1e2328, #1a1c24); border: 1px solid #c8aa6e;
-        padding: 20px; border-radius: 10px; text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.6); height: 100%;
+        background: linear-gradient(145deg, #1e2328, #1a1c24);
+        border: 1px solid #c8aa6e;
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.6);
+        height: 100%;
     }
     .medal-icon { font-size: 3em; margin-bottom: 10px; }
     .medal-title { color: #d4af37; font-weight: bold; font-size: 1.2em; text-transform: uppercase; }
     .medal-player { color: #ff4b4b; font-weight: bold; font-size: 1.8em; margin: 10px 0; }
     .medal-desc { color: #a0a0a0; font-style: italic; font-size: 0.9em; }
-
+    
+    /* Títulos deidara HO */
     .title-text { font-size: 3.5em; font-weight: bold; color: #ff4b4b; text-align: center; text-shadow: 2px 2px #000; }
     .subtitle-text { font-size: 1.2em; font-style: italic; color: #a0a0a0; text-align: center; margin-bottom: 30px; }
     .footer-group { font-size: 1.5em; color: #ffffff; text-align: left; margin-top: 50px; }
@@ -82,7 +99,7 @@ st.markdown("""
 class MatchStats(BaseModel):
     MatchID: str; Data: str; Timestamp: float; Jogador: str; Tipo: str; Vitoria: bool; Score: float
     K: int; D: int; A: int; Part: float; Dano_Estruturas: int; DPM: float; Pinks: int
-    RankRiot: Optional[str] = "Unranked"
+    RankRiot: Optional[str] = "Unranked" # Campo Essencial para a Tabela
 
 class BravuraEngine:
     @staticmethod
@@ -97,21 +114,21 @@ class BravuraEngine:
         return round(score, 2)
 
 # ==============================================================================
-# 3. INFRASTRUCTURE & SMART REQUEST
+# 3. INFRASTRUCTURE (Com Proteção Anti-KeyError e Anti-429)
 # ==============================================================================
 class DatabaseAdapter:
     FILE_DB = 'leaguestats_bravura.csv'
     def __init__(self):
-        if not os.path.exists(self.FILE_DB):
-            pd.DataFrame(columns=MatchStats.model_fields.keys()).to_csv(self.FILE_DB, index=False)
-        else:
-            # Auto-repair para colunas novas
+        # Auto-reparo: Se o arquivo existir mas não tiver RankRiot, adiciona.
+        if os.path.exists(self.FILE_DB):
             try:
                 df = pd.read_csv(self.FILE_DB)
                 if 'RankRiot' not in df.columns:
                     df['RankRiot'] = 'Unranked'
                     df.to_csv(self.FILE_DB, index=False)
             except: pass
+        else:
+            pd.DataFrame(columns=MatchStats.model_fields.keys()).to_csv(self.FILE_DB, index=False)
     
     def get_all(self):
         try:
@@ -123,6 +140,7 @@ class DatabaseAdapter:
     def save(self, stats: MatchStats):
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
+            # Chave composta (MatchID + Jogador)
             if not ((df['MatchID'] == str(stats.MatchID)) & (df['Jogador'] == stats.Jogador.upper())).any():
                 pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
                 return True
@@ -138,30 +156,22 @@ class RiotAdapter:
     
     # --- FUNÇÃO BLINDADA ANTI-429 ---
     def _safe_request(self, url):
-        """Tenta fazer a requisição. Se der 429, espera e tenta de novo."""
-        retries = 3
-        for i in range(retries):
+        """Espera se a Riot mandar parar (Erro 429)"""
+        for i in range(3):
             resp = requests.get(url, headers=self.headers)
-            if resp.status_code == 200:
-                return resp.json()
+            if resp.status_code == 200: return resp.json()
             elif resp.status_code == 429:
-                wait_time = int(resp.headers.get("Retry-After", 10))
-                # Se o wait time for muito longo, limita a 15s para não travar tudo
-                wait = min(wait_time, 15)
-                time.sleep(wait) 
-                continue # Tenta de novo
-            else:
-                return None # Erro real (404, 403, etc)
+                time.sleep(10) # Espera 10s
+                continue
+            else: return None
         return None
 
     def fetch_flex_rank(self, puuid):
         try:
             s_data = self._safe_request(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}")
             if not s_data: return "Unranked"
-            
             l_data = self._safe_request(f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{s_data['id']}")
             if not l_data: return "Unranked"
-            
             flex = next((l for l in l_data if l['queueType'] == "RANKED_FLEX_SR"), None)
             return f"{flex['tier']} {flex['rank']}" if flex else "Unranked"
         except: return "Unranked"
@@ -169,21 +179,17 @@ class RiotAdapter:
     def fetch_matches(self, nome, tag, limit=15):
         try:
             n, t = quote(nome.strip()), quote(tag.replace('#','').strip())
-            
-            # Busca Conta
             acc = self._safe_request(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n}/{t}")
             if not acc: return None, "Erro Conta/429"
             
             puuid = acc['puuid']
             rank_flex = self.fetch_flex_rank(puuid)
-            
-            # Busca Lista de Partidas
             m_ids = self._safe_request(f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime=1735689600&start=0&count={limit}")
+            
             if not m_ids: return [], None
-
+            
             data = []
             for m_id in m_ids:
-                # Busca Detalhes da Partida
                 d = self._safe_request(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}")
                 if d:
                     p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
@@ -193,10 +199,7 @@ class RiotAdapter:
                         qid = d['info']['queueId']
                         tipo = 'Flex' if qid == 440 else ('SoloQ' if qid == 420 else 'Outros')
                         data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo=tipo, Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 1), Pinks=p['visionWardsBoughtInGame'], RankRiot=rank_flex))
-                
-                # Delay forçado entre partidas para evitar 429
-                time.sleep(0.8) 
-                
+                time.sleep(0.5) # Delay preventivo
             return data, None
         except Exception as e: return None, str(e)
 
@@ -223,38 +226,28 @@ def render():
         
         st.markdown("---")
         if modo == "Sincronizar Squad (API)":
-            if st.button("🔄 ATUALIZAR SQUAD (LENTO & SEGURO)"):
-                bar = st.progress(0, text="Iniciando motor blindado...")
-                status_box = st.empty()
-                
-                total_jogadores = len(SQUAD_LIST)
+            if st.button("🔄 ATUALIZAR SQUAD (BLINDADO)"):
+                bar = st.progress(0, text="Iniciando motor...")
+                status = st.empty()
                 saved_count = 0
-                
                 for idx, p in enumerate(SQUAD_LIST):
-                    nome_formatado = f"{p['nick']} #{p['tag']}"
-                    bar.progress(idx / total_jogadores, text=f"Analisando: {nome_formatado}")
-                    
+                    bar.progress(idx/len(SQUAD_LIST), text=f"Lendo {p['nick']}...")
                     matches, err = riot.fetch_matches(p['nick'], p['tag'])
-                    
                     if matches:
-                        p_saved = 0
+                        cnt = 0
                         for m in matches: 
-                            if db.save(m): p_saved += 1
-                        saved_count += p_saved
-                        status_box.info(f"✅ {p['nick']}: {p_saved} novas.")
+                            if db.save(m): cnt += 1
+                        saved_count += cnt
+                        status.info(f"✅ {p['nick']}: {cnt} novas.")
                     elif err:
-                        status_box.warning(f"⚠️ {p['nick']}: {err}")
-                    
-                    # Pausa extra entre jogadores
-                    time.sleep(1.5)
-
-                bar.progress(1.0, text="Finalizado!")
+                        status.warning(f"⚠️ {p['nick']}: {err}")
+                    time.sleep(1) # Delay extra entre players
+                bar.progress(1.0, text="Fim!")
                 if saved_count > 0:
-                    st.success(f"Concluído! {saved_count} novas partidas adicionadas.")
+                    st.success(f"Sucesso! +{saved_count} partidas.")
                     time.sleep(2)
                     st.rerun()
-                else:
-                    st.info("Varredura completa. Nenhuma partida nova.")
+                else: st.info("Nada novo.")
 
         else:
             u_file = st.file_uploader("Upload Custom", type=['png','jpg'])
@@ -268,7 +261,7 @@ def render():
                     db.save(m)
                     st.success("Custom Salva!")
                     st.rerun()
-                except: st.error("Erro ao ler imagem.")
+                except: st.error("Erro no print.")
 
         st.markdown("---")
         if st.button("🗑️ Resetar Tudo"):
@@ -277,33 +270,35 @@ def render():
 
     df = db.get_all()
     if df.empty:
-        st.info("Sincronize o Squad para começar!")
+        st.info("Base vazia. Sincronize o Squad!")
         return
 
+    # Abas com as Features Novas + Visual Antigo
     tab_rank, tab_medalhas, tab_custom = st.tabs(["🏆 RANKING GERAL", "🎖️ MURAL DE MEDALHAS", "👹 CUSTOMS"])
 
     with tab_rank:
         df_f = df[df['Tipo'] != 'Custom']
         if not df_f.empty:
             k1, k2, k3, k4 = st.columns(4)
+            # Cards com Delta Verde Restaurados
             top_player = df_f.groupby('Jogador')['Score'].sum().idxmax()
             top_dmg = df_f.groupby('Jogador')['DPM'].mean().idxmax()
             k1.metric("🔥 MVP Ofensivo", top_player, "Líder Supremo")
             k2.metric("💀 Rei do Dano", top_dmg, f"Média: {df_f['DPM'].max():.0f}")
-            k3.metric("🎮 Partidas", len(df_f), "Analisadas")
+            k3.metric("🎮 Partidas", len(df_f), f"Total")
             k4.metric("📊 Score Médio", f"{df_f['Score'].mean():.1f}", "Global")
 
             st.markdown("---")
-            
-            c1, c2 = st.columns([1.2, 2])
+            c1, c2 = st.columns([1.3, 2])
             with c1:
                 st.subheader("Leaderboard")
+                # Tabela com Elo HO e Rank Riot
                 leader = df_f.groupby('Jogador').agg({'Score': 'sum', 'RankRiot': 'last'}).sort_values('Score', ascending=False).reset_index()
                 leader['Elo HO'] = leader['Score'].apply(get_elo_bravura)
                 st.dataframe(leader[['Jogador', 'Elo HO', 'Score', 'RankRiot']].style.background_gradient(cmap='YlOrRd', subset=['Score']), use_container_width=True, height=450)
 
             with c2:
-                st.subheader("Evolução")
+                st.subheader("Evolução (Spline)")
                 df_f = df_f.sort_values('Timestamp')
                 df_f['Acumulado'] = df_f.groupby('Jogador')['Score'].cumsum()
                 fig = go.Figure()
