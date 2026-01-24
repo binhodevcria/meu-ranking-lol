@@ -11,59 +11,34 @@ from datetime import datetime
 from PIL import Image
 from pydantic import BaseModel
 from typing import Optional, List
-from urllib.parse import quote  # <--- A IMPORTAÇÃO QUE CORRIGE OS ESPAÇOS
+from urllib.parse import quote
 
 # ==============================================================================
-# 0. CONFIGURAÇÕES GLOBAIS & TEMAS
+# 0. CONFIGURAÇÕES
 # ==============================================================================
 st.set_page_config(page_title="LeagueStats: Bravura Edition", layout="wide", page_icon="🛡️")
 
-# Tema CSS (Dark & Clean)
+# CSS para mensagens de log
 st.markdown("""
 <style>
-    /* Fundo e Fontes */
     .stApp { background-color: #0e1117; }
-    h1, h2, h3 { font-family: 'Roboto', sans-serif; color: #ffffff; }
-    
-    /* Cards de Métricas */
-    div[data-testid="metric-container"] {
-        background-color: #1a1c24;
-        border-left: 5px solid #d4af37; /* Dourado */
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-    }
-    
-    /* Tabelas */
-    .dataframe { font-size: 14px; }
-    
-    /* Botões */
-    .stButton>button {
-        background-color: #2b313e;
-        color: white;
-        border: 1px solid #4a4e69;
-        border-radius: 5px;
-    }
-    .stButton>button:hover {
-        border-color: #d4af37;
-        color: #d4af37;
-    }
-    
-    /* Botão de Perigo */
-    div[data-testid="stExpander"] { border: 1px solid #ff4b4b; }
+    h1, h2, h3 { color: white; font-family: sans-serif; }
+    .log-success { color: #4ade80; font-family: monospace; font-size: 12px; }
+    .log-warn { color: #facc15; font-family: monospace; font-size: 12px; }
+    .log-error { color: #f87171; font-family: monospace; font-size: 12px; }
+    div[data-testid="metric-container"] { background-color: #1a1c24; border-left: 5px solid #d4af37; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 1. DOMAIN LAYER (Regras de Negócio - Sociologia)
+# 1. LOGIC LAYER
 # ==============================================================================
 class MatchStats(BaseModel):
-    """Modelo de dados validado (Pydantic) para garantir consistência."""
     MatchID: str
     Data: str
     Timestamp: float
     Jogador: str
-    Tipo: str # 'Flex' ou 'Custom'
+    Tipo: str
     Vitoria: bool
     Score: float
     K: int
@@ -75,62 +50,35 @@ class MatchStats(BaseModel):
     Pinks: int
 
 class BravuraEngine:
-    """Motor de cálculo do Score. A 'Constituição' do grupo."""
-    
     @staticmethod
-    def calculate_score(vitoria: bool, d: int, part: float, dano_est: int, dano_camp: int, minutos: int, pinks: int) -> float:
-        # 1. Base (Vitória vale 25, Derrota 0 - Acúmulo Positivo)
+    def calculate_score(vitoria, d, part, dano_est, dano_camp, minutos, pinks):
         score = 25.0 if vitoria else 0.0
-        
-        # 2. Pressão de Combate (40% de peso na participação)
         score += (part * 40)
-        
-        # 3. Volume de Jogo (DPM / 100)
         dpm = dano_camp / minutos if minutos > 0 else 0
         score += (dpm / 100)
-        
-        # 4. Pressão de Mapa (Dano Estruturas / 500)
         score += (dano_est / 500)
-        
-        # 5. Visão Ofensiva
         score += (pinks * 2)
-        
-        # 6. PENALIDADE SOCIAL (Filtro Anti-KDA Player)
-        # Morreu pouco (<=2) e não ajudou (<35%) = Punição Severa
-        if d <= 2 and part < 0.35:
-            score -= 25.0
-            
+        if d <= 2 and part < 0.35: score -= 25.0
         return round(score, 2)
 
 # ==============================================================================
-# 2. INFRASTRUCTURE LAYER (Adapters & Services)
+# 2. DATA LAYER
 # ==============================================================================
 class DatabaseAdapter:
-    """Gerencia persistência (CSV) simulando um Banco de Dados."""
     FILE_DB = 'leaguestats_bravura.csv'
-
     def __init__(self):
-        if not os.path.exists(self.FILE_DB):
-            self._create_db()
-
+        if not os.path.exists(self.FILE_DB): self._create_db()
     def _create_db(self):
-        df = pd.DataFrame(columns=MatchStats.model_fields.keys())
-        df.to_csv(self.FILE_DB, index=False)
-
-    def get_all(self) -> pd.DataFrame:
-        if not os.path.exists(self.FILE_DB):
-            self._create_db()
+        pd.DataFrame(columns=MatchStats.model_fields.keys()).to_csv(self.FILE_DB, index=False)
+    def get_all(self):
+        if not os.path.exists(self.FILE_DB): self._create_db()
         return pd.read_csv(self.FILE_DB)
-
     def save(self, stats: MatchStats):
         df = self.get_all()
-        # Idempotência: Não salva se já existir o ID
         if stats.MatchID not in df['MatchID'].values:
-            new_row = pd.DataFrame([stats.model_dump()])
-            pd.concat([df, new_row], ignore_index=True).to_csv(self.FILE_DB, index=False)
+            pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
             return True
         return False
-    
     def reset_database(self):
         if os.path.exists(self.FILE_DB):
             os.remove(self.FILE_DB)
@@ -139,266 +87,192 @@ class DatabaseAdapter:
         return False
 
 class RiotAdapter:
-    """Conecta com a Riot API. Inclui tratamento de erro e cache."""
     def __init__(self, api_key):
         self.headers = {"X-Riot-Token": api_key}
         self.season_start = 1735689600 # 01/01/2026
 
-    def fetch_flex_matches(self, nome, tag, limit=10):
+    def fetch_matches(self, nome, tag, limit=10, force_any_queue=False):
+        status_log = [] # Lista para guardar logs de debug
+        
         try:
-            # --- CORREÇÃO DE URL (FIX CRÍTICO) ---
-            # 1. Remove a tralha (#) se o usuário digitou
+            # 1. CONTA (Account V1)
             tag_clean = tag.replace('#', '').strip()
-            
-            # 2. Codifica espaços e caracteres especiais para URL
-            # Ex: "O Magro de OZ" vira "O%20Magro%20de%20OZ"
             nome_enc = quote(nome.strip())
             tag_enc = quote(tag_clean)
 
-            # 1. Account V1
             acc_url = f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{nome_enc}/{tag_enc}"
+            status_log.append(f"🔍 Buscando conta: {nome} #{tag_clean}...")
+            
             acc_resp = requests.get(acc_url, headers=self.headers)
             
-            if acc_resp.status_code != 200: 
-                return None, f"Erro Conta ({acc_resp.status_code}): Verifique nick/tag exatos."
+            if acc_resp.status_code == 404:
+                return None, f"❌ Jogador não encontrado. Verifique se o Nick e a Tag #{tag_clean} estão exatos.", status_log
+            elif acc_resp.status_code == 403:
+                return None, "❌ Chave da Riot Expirada (403). Gere uma nova.", status_log
+            elif acc_resp.status_code != 200:
+                return None, f"❌ Erro na Riot API: {acc_resp.status_code}", status_log
             
             puuid = acc_resp.json()['puuid']
+            status_log.append(f"✅ Conta encontrada! PUUID: {puuid[:10]}...")
 
-            # 2. Match V5 (Flex Queue 440)
-            matches_url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime={self.season_start}&queue=440&start=0&count={limit}"
+            # 2. MATCH IDs
+            # Queue 440 = Flex // Se force_any_queue=True, removemos o filtro de fila
+            queue_param = "" if force_any_queue else "&queue=440"
+            queue_name = "QUALQUER FILA" if force_any_queue else "FLEX (440)"
+            
+            matches_url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime={self.season_start}{queue_param}&start=0&count={limit}"
+            
+            status_log.append(f"🔍 Buscando histórico em {queue_name}...")
             matches_resp = requests.get(matches_url, headers=self.headers)
-            if matches_resp.status_code != 200: return None, f"Erro Partidas: {matches_resp.status_code}"
+            
+            if matches_resp.status_code != 200:
+                return None, f"Erro ao buscar lista de partidas: {matches_resp.status_code}", status_log
             
             match_ids = matches_resp.json()
+            
+            if not match_ids:
+                return None, f"⚠️ Nenhuma partida encontrada na Season 2026 em {queue_name}.", status_log
+            
+            status_log.append(f"✅ Encontradas {len(match_ids)} partidas. Baixando detalhes...")
+            
             processed_data = []
-
-            # Progress Bar para UX
-            bar = st.progress(0, text="A descarregar Replays...")
+            bar = st.progress(0, text="Baixando replays...")
+            
             for i, m_id in enumerate(match_ids):
-                bar.progress((i + 1) / len(match_ids), text=f"A analisar partida {i+1}/{len(match_ids)}")
-                
-                # Fetch Detalhes
-                detail_url = f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}"
-                d_resp = requests.get(detail_url, headers=self.headers)
+                bar.progress((i + 1) / len(match_ids), text=f"Analisando {i+1}/{len(match_ids)}")
+                d_resp = requests.get(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}", headers=self.headers)
                 
                 if d_resp.status_code == 200:
                     d = d_resp.json()
                     p = next(part for part in d['info']['participants'] if part['puuid'] == puuid)
+                    mins = d['info']['gameDuration'] / 60
                     
-                    minutos = d['info']['gameDuration'] / 60
-                    
-                    # Usando o Motor de Domínio
-                    score_final = BravuraEngine.calculate_score(
+                    sc = BravuraEngine.calculate_score(
                         p['win'], p['deaths'], p['challenges'].get('killParticipation', 0),
-                        p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], 
-                        minutos, p['visionWardsBoughtInGame']
+                        p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame']
                     )
                     
                     processed_data.append(MatchStats(
                         MatchID=m_id,
                         Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%Y-%m-%d %H:%M'),
                         Timestamp=d['info']['gameCreation'],
-                        Jogador=nome.upper(), # Salva o nome limpo original
-                        Tipo='Flex',
-                        Vitoria=p['win'],
-                        Score=score_final,
-                        K=p['kills'], D=p['deaths'], A=p['assists'],
+                        Jogador=nome.upper(),
+                        Tipo='Flex' if not force_any_queue else 'Outros', # Marca como Outros se for teste
+                        Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'],
                         Part=p['challenges'].get('killParticipation', 0),
                         Dano_Estruturas=p['damageDealtToBuildings'],
-                        DPM=round(p['totalDamageDealtToChampions']/minutos, 2),
+                        DPM=round(p['totalDamageDealtToChampions']/mins, 2),
                         Pinks=p['visionWardsBoughtInGame']
                     ))
-                time.sleep(0.1) # Respeita rate limit da Riot
+                time.sleep(0.05)
             
             bar.empty()
-            return processed_data, None
-            
+            return processed_data, None, status_log
+
         except Exception as e:
-            return None, str(e)
+            return None, f"Erro Crítico: {str(e)}", status_log
 
 class GeminiAdapter:
-    """Visão Computacional para ler prints."""
     def __init__(self, api_key):
         if api_key:
             genai.configure(api_key=api_key)
             self.model = genai.GenerativeModel('models/gemini-1.5-flash')
-        else:
-            self.model = None
-
+        else: self.model = None
     def analyze(self, image, player_name):
         if not self.model: return None
-        # Prompt otimizado para JSON estrito
-        prompt = f"""
-        Extraia estatísticas de LoL para o jogador '{player_name}'.
-        Retorne APENAS JSON:
-        {{"vitoria": bool, "k": int, "d": int, "a": int, "part": float (0-1), 
-          "dano_est": int, "dano_camp": int, "min": int, "pinks": int}}
-        Use 0 se não encontrar valor.
-        """
         try:
-            resp = self.model.generate_content([prompt, image])
+            resp = self.model.generate_content([f"Extraia stats LoL JSON para {player_name}: {{'vitoria':bool,'k':int,'d':int,'a':int,'part':float,'dano_est':int,'dano_camp':int,'min':int,'pinks':int}}", image])
             return json.loads(resp.text.replace('```json', '').replace('```', '').strip())
         except: return None
 
 # ==============================================================================
-# 3. UI LAYER (Interface Gráfica)
+# 3. UI LAYER
 # ==============================================================================
-
-# Função auxiliar segura para converter cor hex para RGBA
-def safe_hex_to_rgba(hex_color, opacity=0.1):
-    try:
-        c = hex_color.lstrip('#')
-        return f"rgba({int(c[0:2], 16)}, {int(c[2:4], 16)}, {int(c[4:6], 16)}, {opacity})"
-    except:
-        return hex_color
-
 def render_dashboard():
     db = DatabaseAdapter()
-    riot = RiotAdapter(st.secrets.get("RIOT_KEY"))
-    gemini = GeminiAdapter(st.secrets.get("GEMINI_KEY"))
+    riot = RiotAdapter(st.secrets.get("RIOT_KEY", ""))
+    gemini = GeminiAdapter(st.secrets.get("GEMINI_KEY", ""))
 
     st.title("🛡️ LeagueStats: Bravura Tracker")
-    st.caption("Season 2026 • Sociologia do Jogo • Powered by Riot & Gemini")
+    st.caption("Season 2026 • Sociologia do Jogo")
 
-    # --- SIDEBAR (CONTROLES) ---
     with st.sidebar:
-        st.header("🎮 Central de Controlo")
-        mode = st.radio("Fonte de Dados:", ["Riot API (Flex)", "Gemini OCR (Custom)"])
-        
+        st.header("🎮 Central de Controle")
+        mode = st.radio("Fonte:", ["Riot API", "Gemini OCR"])
         st.markdown("---")
-        if mode == "Riot API (Flex)":
-            st.info("Digite o Nick exatamente como no jogo.")
+        
+        if mode == "Riot API":
             nick = st.text_input("Nick (Ex: O Magro de OZ)")
             tag = st.text_input("Tag (Ex: BR1)")
-            limit = st.slider("Buscar últimas:", 5, 50, 20)
+            any_queue = st.checkbox("Ignorar filtro Flex (Modo Debug)", value=False, help="Marque isso se o jogador não joga Flex, só para testar se o Nick está certo.")
             
             if st.button("🔄 Sincronizar") and nick and tag:
-                matches, error = riot.fetch_flex_matches(nick, tag, limit)
+                matches, error, logs = riot.fetch_matches(nick, tag, limit=20, force_any_queue=any_queue)
+                
+                # Exibe logs de diagnóstico
+                with st.expander("📜 Logs de Diagnóstico", expanded=True):
+                    for log in logs:
+                        st.markdown(f"<span class='log-success'>{log}</span>", unsafe_allow_html=True)
+                    if error:
+                        st.markdown(f"<span class='log-error'>{error}</span>", unsafe_allow_html=True)
+
                 if matches:
-                    new_count = 0
-                    for m in matches:
-                        if db.save(m): new_count += 1
-                    if new_count > 0: st.success(f"{new_count} novas partidas!")
-                    else: st.info("Tudo atualizado.")
-                    st.rerun()
-                elif error:
-                    st.error(f"Erro: {error}")
+                    count = sum([1 for m in matches if db.save(m)])
+                    if count > 0:
+                        st.success(f"Sucesso! {count} novas partidas salvas.")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.info("Histórico já estava atualizado.")
         
         else:
-            uploaded = st.file_uploader("Print da Partida", type=['png', 'jpg'])
-            p_name = st.text_input("Nome no Print").upper()
-            if st.button("🤖 Analisar") and uploaded and p_name:
-                with st.spinner("A processar..."):
-                    raw = gemini.analyze(Image.open(uploaded), p_name)
-                    if raw:
-                        sc = BravuraEngine.calculate_score(
-                            raw['vitoria'], raw['d'], raw['part'], raw['dano_est'], 
-                            raw['dano_camp'], raw['min'], raw['pinks']
-                        )
-                        # Cria objeto validado
-                        match = MatchStats(
-                            MatchID=f"cust_{int(time.time())}",
-                            Data=datetime.now().strftime('%Y-%m-%d %H:%M'),
-                            Timestamp=time.time()*1000,
-                            Jogador=p_name, Tipo='Custom',
-                            Vitoria=raw['vitoria'], Score=sc,
-                            K=raw['k'], D=raw['d'], A=raw['a'], Part=raw['part'],
-                            Dano_Estruturas=raw['dano_est'],
-                            DPM=round(raw['dano_camp']/raw['min'], 2),
-                            Pinks=raw['pinks']
-                        )
-                        db.save(match)
-                        st.success(f"Custom Salva! Score: {sc}")
-                        st.rerun()
-                    else: st.error("Falha na leitura.")
-
-        # --- ZONA DE PERIGO (RESET) ---
-        st.markdown("---")
-        with st.expander("🔥 Zona de Perigo"):
-            st.warning("Atenção: Isto apaga TODOS os dados!")
-            if st.button("🗑️ APAGAR TUDO", type="primary"):
-                if db.reset_database():
-                    st.toast("Base de dados reiniciada! 💥")
-                    time.sleep(1)
+            u_file = st.file_uploader("Print", type=['png','jpg'])
+            p_name = st.text_input("Nick no Print").upper()
+            if st.button("Analisar") and u_file:
+                raw = gemini.analyze(Image.open(u_file), p_name)
+                if raw:
+                    sc = BravuraEngine.calculate_score(raw['vitoria'], raw['d'], raw['part'], raw['dano_est'], raw['dano_camp'], raw['min'], raw['pinks'])
+                    match = MatchStats(MatchID=f"c_{int(time.time())}", Data=datetime.now().strftime('%Y-%m-%d %H:%M'), Timestamp=time.time()*1000, Jogador=p_name, Tipo='Custom', Vitoria=raw['vitoria'], Score=sc, K=raw['k'], D=raw['d'], A=raw['a'], Part=raw['part'], Dano_Estruturas=raw['dano_est'], DPM=round(raw['dano_camp']/raw['min'], 2), Pinks=raw['pinks'])
+                    db.save(match)
                     st.rerun()
 
-    # --- ÁREA PRINCIPAL ---
+        st.markdown("---")
+        with st.expander("🔥 Zona de Perigo"):
+            if st.button("🗑️ Resetar Tudo", type="primary"): 
+                db.reset_database()
+                st.rerun()
+
+    # DASHBOARD
     df = db.get_all()
     if df.empty:
-        st.info("👋 Bem-vindo! Comece por sincronizar dados na barra lateral.")
+        st.info("👋 Nenhuma partida registrada. Use a barra lateral para adicionar.")
         return
 
-    # Tabs separadas
-    tab_flex, tab_custom = st.tabs(["🏆 COMPETITIVO (FLEX)", "👹 RESENHA (CUSTOM)"])
-
-    for tab, tipo in [(tab_flex, 'Flex'), (tab_custom, 'Custom')]:
-        with tab:
-            df_filter = df[df['Tipo'] == tipo].copy()
-            if df_filter.empty:
-                st.warning(f"Sem dados de {tipo} ainda.")
-                continue
-
-            # 1. KPIs de Topo
-            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            top_player = df_filter.groupby('Jogador')['Score'].sum().idxmax()
-            top_dmg = df_filter.groupby('Jogador')['DPM'].mean().idxmax()
+    # TABS (Agora filtramos por Tipo dinamicamente)
+    tipos_disponiveis = df['Tipo'].unique()
+    tabs = st.tabs([f"🏆 {t}" for t in tipos_disponiveis])
+    
+    for i, tipo in enumerate(tipos_disponiveis):
+        with tabs[i]:
+            df_t = df[df['Tipo'] == tipo].copy()
             
-            kpi1.metric("MVP da Season", top_player, "Bravura Máxima")
-            kpi2.metric("Rei do Dano", top_dmg, f"{df_filter.groupby('Jogador')['DPM'].mean().max():.0f} DPM")
-            kpi3.metric("Total de Jogos", len(df_filter), f"{len(df_filter['MatchID'].unique())} partidas")
-            kpi4.metric("Score Médio", f"{df_filter['Score'].mean():.1f}", "Pontos por jogo")
-
+            k1, k2, k3, k4 = st.columns(4)
+            top = df_t.groupby('Jogador')['Score'].sum().idxmax()
+            k1.metric("MVP", top)
+            k2.metric("Maior DPM", f"{df_t['DPM'].max():.0f}")
+            k3.metric("Jogos", len(df_t))
+            k4.metric("Média Score", f"{df_t['Score'].mean():.1f}")
+            
             st.markdown("---")
-
-            # 2. Layout Assimétrico
-            col_table, col_graph = st.columns([1, 3])
-            
-            with col_table:
-                st.subheader("Leaderboard")
-                rank = df_filter.groupby('Jogador')['Score'].sum().sort_values(ascending=False).reset_index()
-                rank.index += 1
-                st.dataframe(
-                    rank.style.background_gradient(cmap='YlOrRd', subset=['Score']),
-                    use_container_width=True,
-                    height=350
-                )
-                
-                with st.expander("Ver Estatísticas Técnicas"):
-                    details = df_filter.groupby('Jogador').agg({
-                        'DPM': 'mean', 'Dano_Estruturas': 'mean', 'Part': 'mean', 'Pinks': 'mean'
-                    })
-                    st.dataframe(details.style.format("{:.1f}"))
-
-            with col_graph:
-                st.subheader("Evolução Temporal")
-                df_filter = df_filter.sort_values('Timestamp')
-                df_filter['Acumulado'] = df_filter.groupby('Jogador')['Score'].cumsum()
-                
-                fig = go.Figure()
-                colors = px.colors.qualitative.Pastel
-                
-                for i, player in enumerate(df_filter['Jogador'].unique()):
-                    d_p = df_filter[df_filter['Jogador'] == player]
-                    color = colors[i % len(colors)]
-                    
-                    fill_color_rgba = safe_hex_to_rgba(color, 0.1)
-
-                    fig.add_trace(go.Scatter(
-                        x=d_p['Data'], y=d_p['Acumulado'],
-                        name=player,
-                        mode='lines+markers',
-                        line=dict(shape='spline', width=3, color=color),
-                        fill='tozeroy',
-                        fillcolor=fill_color_rgba
-                    ))
-                
-                fig.update_layout(
-                    template="plotly_dark",
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    hovermode="x unified",
-                    legend=dict(orientation="h", y=1.1, x=0.5, xanchor='center')
-                )
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                st.dataframe(df_t.groupby('Jogador')['Score'].sum().sort_values(ascending=False).reset_index(), use_container_width=True)
+            with c2:
+                df_t = df_t.sort_values('Timestamp')
+                df_t['Acumulado'] = df_t.groupby('Jogador')['Score'].cumsum()
+                fig = px.line(df_t, x='Data', y='Acumulado', color='Jogador', markers=True, template='plotly_dark')
+                # Configura spline suave
+                fig.update_traces(line_shape='spline', mode='lines+markers')
                 st.plotly_chart(fig, use_container_width=True)
 
 if __name__ == "__main__":
