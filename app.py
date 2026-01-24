@@ -13,9 +13,8 @@ from pydantic import BaseModel
 from urllib.parse import quote
 
 # ==============================================================================
-# 0. SQUAD LIST & MAPEAMENTO DE CONTAS
+# 0. CONFIGURAÇÃO SQUAD & MAPEAMENTO
 # ==============================================================================
-# Adicionei as 3 contas do Guiza aqui
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
     {"nick": "Naguinha", "tag": "INTEN"},
@@ -31,7 +30,7 @@ SQUAD_LIST = [
     {"nick": "MEC Viper", "tag": "MEC"}
 ]
 
-# Mapeia nicks de jogo para o nome real na tabela
+# Unificação das contas do Guiza
 NOME_DISPLAY = {
     "GUIZINHA": "GUIZA",
     "EZFALSE": "GUIZA",
@@ -41,22 +40,23 @@ NOME_DISPLAY = {
 st.set_page_config(page_title="OFENSIVO SCORE", layout="wide", page_icon="⚔️")
 
 # ==============================================================================
-# 1. IDENTIDADE VISUAL LEAGUESTATS (RESTAURADA)
+# 1. IDENTIDADE VISUAL (Deltas Verdes e Cards Dourados)
 # ==============================================================================
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; }
     h1, h2, h3 { font-family: 'Roboto', sans-serif; color: #ffffff; }
     
-    /* Cards Dourados */
+    /* Cards Dourados com Sombra */
     div[data-testid="metric-container"] {
         background-color: #1a1c24;
-        border-left: 4px solid #c8aa6e; /* Dourado */
+        border-left: 4px solid #c8aa6e;
         padding: 15px;
         border-radius: 6px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        box-shadow: 0 4px 10px rgba(0,0,0,0.5);
     }
     
+    /* Títulos deidara HO */
     .title-text { font-size: 3.5em; font-weight: bold; color: #ff4b4b; text-align: center; text-shadow: 2px 2px #000; }
     .subtitle-text { font-size: 1.2em; font-style: italic; color: #a0a0a0; text-align: center; margin-bottom: 30px; }
     .footer-group { font-size: 1.5em; color: #ffffff; text-align: left; margin-top: 50px; }
@@ -71,18 +71,9 @@ st.markdown("""
 # 2. CORE LOGIC
 # ==============================================================================
 class MatchStats(BaseModel):
-    MatchID: str
-    Data: str
-    Timestamp: float
-    Jogador: str
-    Tipo: str
-    Vitoria: bool
-    Score: float
-    K: int; D: int; A: int
-    Part: float
-    Dano_Estruturas: int
-    DPM: float
-    Pinks: int
+    MatchID: str; Data: str; Timestamp: float; Jogador: str; Tipo: str
+    Vitoria: bool; Score: float; K: int; D: int; A: int; Part: float
+    Dano_Estruturas: int; DPM: float; Pinks: int
 
 class BravuraEngine:
     @staticmethod
@@ -97,7 +88,7 @@ class BravuraEngine:
         return round(score, 2)
 
 # ==============================================================================
-# 3. INFRASTRUCTURE (Com Unificação de Nomes)
+# 3. INFRASTRUCTURE
 # ==============================================================================
 class DatabaseAdapter:
     FILE_DB = 'leaguestats_bravura.csv'
@@ -107,13 +98,11 @@ class DatabaseAdapter:
     
     def get_all(self):
         df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
-        # Unifica os nomes do Guiza para o display
         df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(x.upper(), x.upper()))
         return df
 
     def save(self, stats: MatchStats):
         df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
-        # Verifica se essa combinação PARTIDA + CONTA ORIGINAL já existe
         if not ((df['MatchID'] == str(stats.MatchID)) & (df['Jogador'] == stats.Jogador.upper())).any():
             pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
             return True
@@ -138,7 +127,6 @@ class RiotAdapter:
                 sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
                 qid = d['info']['queueId']
                 tipo = 'Flex' if qid == 440 else ('SoloQ' if qid == 420 else 'Outros')
-                # Salva com o nick ORIGINAL da conta para não dar conflito de ID
                 data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%Y-%m-%d %H:%M'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo=tipo, Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 2), Pinks=p['visionWardsBoughtInGame']))
             return data, None
         except Exception as e: return None, str(e)
@@ -178,7 +166,7 @@ def render():
                 st.success(f"Finalizado! +{saved} partidas.")
                 st.rerun()
         else:
-            file = st.file_uploader("Upload", type=['png','jpg'])
+            file = st.file_uploader("Upload Print", type=['png','jpg'])
             p_name = st.text_input("Nick no Print (Ex: Guiza)").upper()
             if st.button("🤖 Analisar") and file and gemini:
                 prompt = f"Extraia stats LoL JSON para {p_name}: {{'vitoria':bool,'k':int,'d':int,'a':int,'part':float,'dano_est':int,'dano_camp':int,'min':int,'pinks':int}}"
@@ -196,15 +184,22 @@ def render():
         df_f = df[df['Tipo'] != 'Custom']
         if not df_f.empty:
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("🔥 MVP Ofensivo", df_f.groupby('Jogador')['Score'].sum().idxmax())
-            k2.metric("💀 Rei do Dano", df_f.groupby('Jogador')['DPM'].mean().idxmax())
-            k3.metric("🎮 Jogos", len(df_f))
-            k4.metric("📈 Média", f"{df_f['Score'].mean():.1f}")
+            # Destaques com o "Delta Verde" (Número pequeno em verde)
+            k1.metric("🔥 MVP Ofensivo", df_f.groupby('Jogador')['Score'].sum().idxmax(), "Status: ATIVO")
+            k2.metric("💀 Rei do Dano", df_f.groupby('Jogador')['DPM'].mean().idxmax(), f"{df_f['DPM'].max():.0f} MAX")
+            k3.metric("🎮 Jogos", len(df_f), f"+{len(df_f[df_f['Timestamp'] > (time.time()*1000 - 86400000)])} HOJE")
+            k4.metric("📈 Média Score", f"{df_f['Score'].mean():.1f}", "BRAVURA")
             
-            c1, c2 = st.columns([1, 2.5])
+            st.markdown("---")
+            c1, c2 = st.columns([1, 2.2])
             with c1:
-                st.dataframe(df_f.groupby('Jogador')['Score'].sum().sort_values(ascending=False).reset_index(), use_container_width=True)
+                st.subheader("Leaderboard")
+                rank = df_f.groupby('Jogador')['Score'].sum().sort_values(ascending=False).reset_index()
+                rank.index += 1
+                # Tabela Colorida Restaurada
+                st.dataframe(rank.style.background_gradient(cmap='YlOrRd', subset=['Score']), use_container_width=True)
             with c2:
+                st.subheader("Evolução (Spline)")
                 df_f = df_f.sort_values('Timestamp')
                 df_f['Acumulado'] = df_f.groupby('Jogador')['Score'].cumsum()
                 fig = go.Figure()
@@ -218,7 +213,9 @@ def render():
     with tab_c:
         df_c = df[df['Tipo'] == 'Custom']
         if not df_c.empty:
-            st.dataframe(df_c.groupby('Jogador')['Score'].sum().sort_values(ascending=False).reset_index(), use_container_width=True)
+            st.subheader("Leaderboard Customs")
+            rank_c = df_c.groupby('Jogador')['Score'].sum().sort_values(ascending=False).reset_index()
+            st.dataframe(rank_c.style.background_gradient(cmap='Reds', subset=['Score']), use_container_width=True)
             st.subheader("Histórico de Resenha")
             st.table(df_c[['Data', 'Jogador', 'Score', 'Vitoria']].tail(10))
 
