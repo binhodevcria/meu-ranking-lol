@@ -30,7 +30,7 @@ SQUAD_LIST = [
     {"nick": "MEC Viper", "tag": "MEC"}
 ]
 
-# Unificação de contas (Visual)
+# Unificação de Contas (Visual)
 NOME_DISPLAY = {
     "GUIZINHA": "GUIZA",
     "EZFALSE": "GUIZA",
@@ -40,7 +40,7 @@ NOME_DISPLAY = {
 st.set_page_config(page_title="OFENSIVO SCORE", layout="wide", page_icon="⚔️")
 
 # ==============================================================================
-# 1. IDENTIDADE VISUAL
+# 1. IDENTIDADE VISUAL (Sua preferida)
 # ==============================================================================
 st.markdown("""
 <style>
@@ -76,7 +76,7 @@ class MatchStats(BaseModel):
 class BravuraEngine:
     @staticmethod
     def calculate_score(vitoria, d, part, dano_est, dano_camp, minutos, pinks):
-        if minutos < 5: return 0.0 # Remake
+        if minutos < 5: return 0.0
         score = 25.0 if vitoria else 0.0
         score += (part * 40)
         dpm = dano_camp / minutos if minutos > 0 else 0
@@ -87,7 +87,7 @@ class BravuraEngine:
         return round(score, 2)
 
 # ==============================================================================
-# 3. INFRASTRUCTURE
+# 3. INFRASTRUCTURE & BANCO
 # ==============================================================================
 class DatabaseAdapter:
     FILE_DB = 'leaguestats_bravura.csv'
@@ -98,6 +98,7 @@ class DatabaseAdapter:
     def get_all(self):
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
+            # Aplica unificação apenas na leitura visual
             df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(x.upper(), x.upper()))
             return df
         except: return pd.DataFrame()
@@ -105,7 +106,7 @@ class DatabaseAdapter:
     def save(self, stats: MatchStats):
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
-            # Acumulativo: Só salva se não existir MatchID + Jogador
+            # Evita duplicidade exata
             if not ((df['MatchID'] == str(stats.MatchID)) & (df['Jogador'] == stats.Jogador.upper())).any():
                 pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
                 return True
@@ -122,47 +123,57 @@ class RiotAdapter:
         self.headers = {"X-Riot-Token": api_key}
         self.season_start = 1735689600 # 2026
 
+    # --- O SEGREDO DO SUCESSO: REQUEST BLINDADO ---
+    def request_blindado(self, url):
+        """Tenta fazer a requisição. Se der 429, espera o tempo necessário."""
+        while True:
+            resp = requests.get(url, headers=self.headers)
+            
+            if resp.status_code == 200:
+                return resp.json()
+            
+            elif resp.status_code == 429:
+                # Pega o tempo que a Riot mandou esperar (Retry-After)
+                wait_time = int(resp.headers.get("Retry-After", 60))
+                # Aviso visual para o usuário não achar que travou
+                st.toast(f"🛑 Limite da Riot atingido! Aguardando {wait_time} segundos...", icon="⏳")
+                time.sleep(wait_time + 1) # Espera +1s de segurança
+                continue # Tenta de novo
+            
+            else:
+                # Erro real (404, 403, etc)
+                return None
+
     def fetch_matches(self, nome, tag, limit=15):
         try:
             nome_enc, tag_enc = quote(nome.strip()), quote(tag.replace('#','').strip())
             
             # 1. Conta
-            acc_resp = requests.get(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{nome_enc}/{tag_enc}", headers=self.headers)
-            if acc_resp.status_code == 429: # Rate Limit
-                time.sleep(5) 
-                return None, "Rate Limit (429) - Tentando próximo..."
-            if acc_resp.status_code != 200: return None, f"Erro Conta: {acc_resp.status_code}"
+            acc = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{nome_enc}/{tag_enc}")
+            if not acc: return None, "Erro ao buscar Conta/Nick"
             
-            puuid = acc_resp.json()['puuid']
+            puuid = acc['puuid']
 
             # 2. Lista de IDs
-            m_url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime={self.season_start}&start=0&count={limit}"
-            m_resp = requests.get(m_url, headers=self.headers)
-            if m_resp.status_code != 200: return None, f"Erro Lista: {m_resp.status_code}"
+            m_ids = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime={self.season_start}&start=0&count={limit}")
+            if not m_ids: return [], None
             
-            match_ids = m_resp.json()
             data = []
-            
-            for m_id in match_ids:
-                d_resp = requests.get(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}", headers=self.headers)
+            for m_id in m_ids:
+                # 3. Detalhes (Blindado)
+                d = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}")
                 
-                # Se der Rate Limit no meio das partidas, espera e tenta de novo uma vez
-                if d_resp.status_code == 429:
-                    time.sleep(2)
-                    d_resp = requests.get(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}", headers=self.headers)
-
-                if d_resp.status_code == 200:
-                    d = d_resp.json()
+                if d:
                     p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
                     if p:
                         mins = d['info']['gameDuration']/60
                         sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
                         qid = d['info']['queueId']
                         tipo = 'Flex' if qid == 440 else ('SoloQ' if qid == 420 else 'Outros')
-                        
-                        data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo=tipo, Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 2), Pinks=p['visionWardsBoughtInGame']))
+                        data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%Y-%m-%d %H:%M'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo=tipo, Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 2), Pinks=p['visionWardsBoughtInGame']))
                 
-                time.sleep(0.2) # Pausa leve entre partidas
+                # Pequena pausa ética para não forçar o 429 toda hora
+                time.sleep(0.5)
             
             return data, None
             
@@ -186,48 +197,47 @@ def render():
     st.markdown("<div class='subtitle-text'>criado para jogadores ofensivos que gostam de rir e vencer</div>", unsafe_allow_html=True)
 
     with st.sidebar:
-        st.header("🎮 deidara HO")
+        st.header("🎮 Painel deidara HO")
         acao = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
         
         st.markdown("---")
         
         if acao == "Sincronizar Squad (API)":
             if st.button("🔄 ATUALIZAR LISTA COMPLETA"):
-                bar = st.progress(0, text="Iniciando busca...")
-                status_box = st.empty()
-                total_salvo = 0
+                # Barra de Progresso Real
+                bar = st.progress(0, text="Iniciando motor de busca blindado...")
+                log_box = st.empty()
+                total_salvo_geral = 0
                 
-                # LOOP BLINDADO
+                total_jogadores = len(SQUAD_LIST)
+                
                 for idx, p in enumerate(SQUAD_LIST):
-                    nome_display = p['nick']
-                    bar.progress(idx / len(SQUAD_LIST), text=f"Analisando {idx+1}/{len(SQUAD_LIST)}: {nome_display}...")
+                    display_name = f"{p['nick']} ({idx+1}/{total_jogadores})"
+                    bar.progress(idx / total_jogadores, text=f"Lendo: {display_name}...")
                     
-                    try:
-                        matches, err = riot.fetch_matches(p['nick'], p['tag'])
-                        
-                        if matches:
-                            c = 0
-                            for m in matches:
-                                if db.save(m): c += 1
-                            total_salvo += c
-                            # Feedback visual rápido
-                            # status_box.info(f"✅ {nome_display}: +{c} jogos")
-                        elif err:
-                            status_box.warning(f"⚠️ {nome_display}: {err}")
-                            
-                    except Exception as e:
-                        status_box.error(f"❌ Erro crítico em {nome_display}: {e}")
+                    matches, err = riot.fetch_matches(p['nick'], p['tag'])
                     
-                    # Pausa estratégica entre jogadores para evitar 429
-                    time.sleep(1.5)
+                    if matches:
+                        novos = 0
+                        for m in matches:
+                            if db.save(m): novos += 1
+                        total_salvo_geral += novos
+                        if novos > 0:
+                            st.toast(f"✅ {p['nick']}: +{novos} jogos salvos!", icon="💾")
+                    elif err:
+                        st.toast(f"⚠️ {p['nick']}: {err}", icon="⚠️")
+                    
+                    # Atualiza o log visual na sidebar
+                    log_box.text(f"Último processado: {p['nick']}")
                 
-                bar.progress(1.0, text="Finalizado!")
-                if total_salvo > 0:
-                    st.success(f"Sucesso! +{total_salvo} partidas novas salvas.")
-                    time.sleep(2)
+                bar.progress(1.0, text="Processo Finalizado!")
+                
+                if total_salvo_geral > 0:
+                    st.success(f"Sucesso Total! +{total_salvo_geral} novas partidas no histórico.")
+                    time.sleep(3)
                     st.rerun()
                 else:
-                    st.info("Varredura completa. Nenhuma partida nova encontrada.")
+                    st.info("Nenhuma partida nova encontrada (os dados já estavam atualizados).")
 
         else:
             file = st.file_uploader("Upload Print", type=['png','jpg'])
@@ -237,11 +247,11 @@ def render():
                     prompt = f"Extraia stats LoL JSON para {p_name}: {{'vitoria':bool,'k':int,'d':int,'a':int,'part':float,'dano_est':int,'dano_camp':int,'min':int,'pinks':int}}"
                     raw = json.loads(gemini.generate_content([prompt, Image.open(file)]).text.replace('```json', '').replace('```', '').strip())
                     sc = BravuraEngine.calculate_score(raw['vitoria'], raw['d'], raw['part'], raw['dano_est'], raw['dano_camp'], raw['min'], raw['pinks'])
-                    m = MatchStats(MatchID=f"c_{int(time.time())}", Data=datetime.now().strftime('%d/%m'), Timestamp=time.time()*1000, Jogador=p_name, Tipo='Custom', Vitoria=raw['vitoria'], Score=sc, K=raw['k'], D=raw['d'], A=raw['a'], Part=raw['part'], Dano_Estruturas=raw['dano_est'], DPM=round(raw['dano_camp']/raw['min'], 2), Pinks=raw['pinks'])
+                    m = MatchStats(MatchID=f"c_{int(time.time())}", Data=datetime.now().strftime('%Y-%m-%d %H:%M'), Timestamp=time.time()*1000, Jogador=p_name, Tipo='Custom', Vitoria=raw['vitoria'], Score=sc, K=raw['k'], D=raw['d'], A=raw['a'], Part=raw['part'], Dano_Estruturas=raw['dano_est'], DPM=round(raw['dano_camp']/raw['min'], 2), Pinks=raw['pinks'])
                     db.save(m)
-                    st.success("Custom Salva!")
+                    st.success("Custom salva!")
                     st.rerun()
-                except: st.error("Erro na leitura do print.")
+                except: st.error("Erro na leitura.")
 
         st.markdown("---")
         if st.button("🗑️ Resetar Database"):
@@ -250,7 +260,7 @@ def render():
 
     df = db.get_all()
     if df.empty:
-        st.info("Base de dados vazia. Clique em Atualizar Lista Completa.")
+        st.info("Banco de dados vazio. Clique em Atualizar Lista Completa.")
         return
 
     tab_f, tab_c = st.tabs(["🏆 OFICIAIS (API)", "👹 CUSTOMS (PRINTS)"])
@@ -259,11 +269,11 @@ def render():
         df_f = df[df['Tipo'] != 'Custom']
         if not df_f.empty:
             k1, k2, k3, k4 = st.columns(4)
-            jogos_hoje = len(df_f[df_f['Timestamp'] > (time.time()*1000 - 86400000)])
+            jogos_recentes = len(df_f[df_f['Timestamp'] > (time.time()*1000 - 86400000)])
             
             k1.metric("🔥 MVP Ofensivo", df_f.groupby('Jogador')['Score'].sum().idxmax(), "Líder")
             k2.metric("💀 Rei do Dano", df_f.groupby('Jogador')['DPM'].mean().idxmax(), f"{df_f['DPM'].max():.0f} Max")
-            k3.metric("🎮 Jogos", len(df_f), f"+{jogos_hoje} Hoje")
+            k3.metric("🎮 Jogos", len(df_f), f"+{jogos_recentes} Hoje")
             k4.metric("📈 Média Score", f"{df_f['Score'].mean():.1f}", "Global")
             
             st.markdown("---")
@@ -292,6 +302,7 @@ def render():
             st.subheader("Leaderboard Customs")
             rank_c = df_c.groupby('Jogador')['Score'].sum().sort_values(ascending=False).reset_index()
             st.dataframe(rank_c.style.background_gradient(cmap='Reds', subset=['Score']), use_container_width=True)
+            st.subheader("Histórico de Resenha")
             st.table(df_c[['Data', 'Jogador', 'Score', 'Vitoria']].tail(10))
 
     st.markdown("<hr><div class='footer-group'>É o grupo</div><div class='footer-final'>deidara HO</div>", unsafe_allow_html=True)
