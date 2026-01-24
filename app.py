@@ -11,7 +11,7 @@ from datetime import datetime
 from PIL import Image
 from pydantic import BaseModel
 from typing import Optional, List
-from urllib.parse import quote # <--- NOVA IMPORTAÇÃO ESSENCIAL
+from urllib.parse import quote  # <--- A IMPORTAÇÃO QUE CORRIGE OS ESPAÇOS
 
 # ==============================================================================
 # 0. CONFIGURAÇÕES GLOBAIS & TEMAS
@@ -146,10 +146,12 @@ class RiotAdapter:
 
     def fetch_flex_matches(self, nome, tag, limit=10):
         try:
-            # LIMPEZA DE URL CRÍTICA:
+            # --- CORREÇÃO DE URL (FIX CRÍTICO) ---
             # 1. Remove a tralha (#) se o usuário digitou
             tag_clean = tag.replace('#', '').strip()
-            # 2. Codifica espaços e caracteres especiais (Sylas 1v9 -> Sylas%201v9)
+            
+            # 2. Codifica espaços e caracteres especiais para URL
+            # Ex: "O Magro de OZ" vira "O%20Magro%20de%20OZ"
             nome_enc = quote(nome.strip())
             tag_enc = quote(tag_clean)
 
@@ -158,7 +160,7 @@ class RiotAdapter:
             acc_resp = requests.get(acc_url, headers=self.headers)
             
             if acc_resp.status_code != 200: 
-                return None, f"Erro Conta ({acc_resp.status_code}): Verifique se digitou o nick exato."
+                return None, f"Erro Conta ({acc_resp.status_code}): Verifique nick/tag exatos."
             
             puuid = acc_resp.json()['puuid']
 
@@ -196,7 +198,7 @@ class RiotAdapter:
                         MatchID=m_id,
                         Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%Y-%m-%d %H:%M'),
                         Timestamp=d['info']['gameCreation'],
-                        Jogador=nome.upper(),
+                        Jogador=nome.upper(), # Salva o nome limpo original
                         Tipo='Flex',
                         Vitoria=p['win'],
                         Score=score_final,
@@ -265,8 +267,9 @@ def render_dashboard():
         
         st.markdown("---")
         if mode == "Riot API (Flex)":
-            nick = st.text_input("Nick")
-            tag = st.text_input("Tag")
+            st.info("Digite o Nick exatamente como no jogo.")
+            nick = st.text_input("Nick (Ex: O Magro de OZ)")
+            tag = st.text_input("Tag (Ex: BR1)")
             limit = st.slider("Buscar últimas:", 5, 50, 20)
             
             if st.button("🔄 Sincronizar") and nick and tag:
