@@ -11,6 +11,7 @@ from datetime import datetime
 from PIL import Image
 from pydantic import BaseModel
 from typing import Optional, List
+from urllib.parse import quote # <--- NOVA IMPORTAÇÃO ESSENCIAL
 
 # ==============================================================================
 # 0. CONFIGURAÇÕES GLOBAIS & TEMAS
@@ -145,10 +146,20 @@ class RiotAdapter:
 
     def fetch_flex_matches(self, nome, tag, limit=10):
         try:
+            # LIMPEZA DE URL CRÍTICA:
+            # 1. Remove a tralha (#) se o usuário digitou
+            tag_clean = tag.replace('#', '').strip()
+            # 2. Codifica espaços e caracteres especiais (Sylas 1v9 -> Sylas%201v9)
+            nome_enc = quote(nome.strip())
+            tag_enc = quote(tag_clean)
+
             # 1. Account V1
-            acc_url = f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{nome}/{tag}"
+            acc_url = f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{nome_enc}/{tag_enc}"
             acc_resp = requests.get(acc_url, headers=self.headers)
-            if acc_resp.status_code != 200: return None, f"Erro Conta: {acc_resp.status_code}"
+            
+            if acc_resp.status_code != 200: 
+                return None, f"Erro Conta ({acc_resp.status_code}): Verifique se digitou o nick exato."
+            
             puuid = acc_resp.json()['puuid']
 
             # 2. Match V5 (Flex Queue 440)
