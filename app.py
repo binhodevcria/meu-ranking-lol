@@ -17,8 +17,9 @@ from typing import Optional
 # ==============================================================================
 # 0. SQUAD LIST & CONFIGURAÇÕES
 # ==============================================================================
-# Define o tamanho do lote de atualização (Rápido e constante)
-BATCH_SIZE = 20 
+# Quantas partidas (de qualquer modo) o robô vai olhar para trás para achar Flex
+# 50 é um número seguro para pular Arenas/SoloQ e achar as Flex recentes
+SCAN_DEPTH = 50 
 
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
@@ -52,20 +53,18 @@ st.markdown("""
     .stApp { background-color: #0e1117; }
     h1, h2, h3 { font-family: 'Roboto', sans-serif; color: #ffffff; }
     
-    /* Cards de KPI */
     div[data-testid="metric-container"] {
         background-color: #1a1c24; border-left: 4px solid #c8aa6e;
         padding: 15px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
     }
     
-    /* Medalhas */
     .medal-box {
         background: linear-gradient(145deg, #1e2328, #1a1c24); border: 1px solid #c8aa6e;
         padding: 15px; border-radius: 10px; text-align: center;
         box-shadow: 0 4px 15px rgba(0,0,0,0.6); height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center;
     }
-    .medal-icon { font-size: 3.5em; margin-bottom: 5px; }
-    .medal-title { color: #d4af37; font-weight: bold; font-size: 1.2em; text-transform: uppercase; margin: 0; }
+    .medal-icon { font-size: 3em; margin-bottom: 5px; }
+    .medal-title { color: #d4af37; font-weight: bold; font-size: 1.1em; text-transform: uppercase; margin: 0; }
     .medal-player { color: #ff4b4b; font-weight: bold; font-size: 1.5em; margin: 5px 0; }
     .medal-desc { color: #a0a0a0; font-style: italic; font-size: 0.9em; }
 
@@ -80,7 +79,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. LÓGICA DE NEGÓCIO
+# 2. LÓGICA
 # ==============================================================================
 class MatchStats(BaseModel):
     MatchID: str; Data: str; Timestamp: float; Jogador: str; Tipo: str
@@ -115,6 +114,7 @@ def get_rank_bravura(media):
 class DatabaseAdapter:
     FILE_DB = 'leaguestats_bravura.csv'
     def __init__(self):
+        # Garante criação correta do CSV
         if os.path.exists(self.FILE_DB):
             try:
                 df = pd.read_csv(self.FILE_DB)
@@ -135,13 +135,11 @@ class DatabaseAdapter:
     def save(self, stats: MatchStats):
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
-            # LÓGICA DE ACÚMULO:
-            # Verifica se essa partida (ID) para esse jogador JÁ EXISTE.
-            # Se não existir, salva. Se existir, ignora.
+            # ACUMULATIVO: Só salva se não existir
             if not ((df['MatchID'] == str(stats.MatchID)) & (df['Jogador'] == stats.Jogador.upper())).any():
                 pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
-                return True
-            return False
+                return True # Retorna True se for novo
+            return False # Retorna False se já existia
         except: return False
     
     def reset_database(self):
@@ -152,7 +150,7 @@ class DatabaseAdapter:
 class RiotAdapter:
     def __init__(self, api_key):
         self.headers = {"X-Riot-Token": api_key}
-        self.season_start = 1735689600 # 2026
+        self.season_start = 1735689600 # 01/01/2026
 
     def request_blindado(self, url):
         for i in range(3):
@@ -167,7 +165,6 @@ class RiotAdapter:
         return None
 
     def fetch_rank(self, puuid):
-        # Tenta buscar o Elo Flex na API BR1
         try:
             summ = self.request_blindado(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}")
             if not summ: return "Unranked"
@@ -178,39 +175,43 @@ class RiotAdapter:
             return "Unranked"
         except: return "Unranked"
 
-    def fetch_latest_flex_batch(self, nome, tag):
+    def fetch_recent_matches(self, nome, tag):
         try:
             n, t = quote(nome.strip()), quote(tag.replace('#','').strip())
             acc = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n}/{t}")
-            if not acc: return None, 0, "Conta não encontrada"
+            if not acc: return None, 0, 0, "Conta não encontrada"
             puuid = acc['puuid']
             
-            # 1. Pega Elo Atualizado
+            # 1. Pega Elo (Snapshot atual)
             rank_atual = self.fetch_rank(puuid)
 
-            # 2. Busca as ÚLTIMAS 20 partidas FLEX (queue=440)
-            # Isso é rápido e eficiente. Se tiver partidas novas, elas estarão aqui.
-            url_ids = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={self.season_start}&start=0&count={BATCH_SIZE}"
+            # 2. Busca IDs (GENÉRICO - SEM FILTRO DE FILA NA URL PARA NÃO BUGAR)
+            # Baixa os últimos 50 jogos que o cara jogou.
+            m_ids = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?startTime={self.season_start}&start=0&count={SCAN_DEPTH}")
             
-            m_ids = self.request_blindado(url_ids)
-            if not m_ids: return [], 0, "Sem Flex Recente"
+            if not m_ids: return [], 0, 0, "Sem histórico"
             
             data = []
+            flex_found_count = 0
             
             for m_id in m_ids:
                 d = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}")
                 if d:
-                    p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
-                    if p:
-                        mins = d['info']['gameDuration']/60
-                        sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
-                        data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo='Flex', Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 2), Pinks=p['visionWardsBoughtInGame'], RankRiot=rank_atual))
+                    # 3. FILTRO PYTHON: É FLEX (440)?
+                    if d['info']['queueId'] == 440:
+                        p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
+                        if p:
+                            mins = d['info']['gameDuration']/60
+                            sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
+                            data.append(MatchStats(MatchID=str(m_id), Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), Timestamp=d['info']['gameCreation'], Jogador=nome.upper(), Tipo='Flex', Vitoria=p['win'], Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], Part=p['challenges'].get('killParticipation', 0), Dano_Estruturas=p['damageDealtToBuildings'], DPM=round(p['totalDamageDealtToChampions']/mins, 2), Pinks=p['visionWardsBoughtInGame'], RankRiot=rank_atual))
+                            flex_found_count += 1
                 
-                time.sleep(0.1) 
+                # Pequena pausa para a API respirar
+                time.sleep(0.1)
+                
+            return data, flex_found_count, len(m_ids), "OK"
             
-            return data, len(data), "OK"
-            
-        except Exception as e: return None, 0, str(e)
+        except Exception as e: return None, 0, 0, str(e)
 
 # ==============================================================================
 # 4. RENDER
@@ -228,26 +229,28 @@ def render():
         acao = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
         
         if acao == "Sincronizar Squad (API)":
-            if st.button(f"🔄 Sincronizar (Últimas {BATCH_SIZE})"):
-                status_log = st.status(f"Buscando as {BATCH_SIZE} últimas Flex de cada um...", expanded=True)
+            if st.button("🔄 Sincronizar (Últimas 50 Recentes)"):
+                status_log = st.status(f"Verificando histórico recente (últimos {SCAN_DEPTH} jogos)...", expanded=True)
                 total_novos = 0
                 
                 for idx, p in enumerate(SQUAD_LIST):
-                    status_log.write(f"🔎 **{p['nick']}**: Verificando...")
+                    status_log.write(f"🔎 **{p['nick']}**: Escaneando...")
                     
-                    matches, total_fetched, msg = riot.fetch_latest_flex_batch(p['nick'], p['tag'])
+                    matches, flex_count, scanned, msg = riot.fetch_recent_matches(p['nick'], p['tag'])
                     
                     if matches is not None:
                         saved_count = 0
                         for m in matches: 
-                            if db.save(m): saved_count += 1 # Só incrementa se for NOVO no banco
+                            if db.save(m): saved_count += 1
                         
                         total_novos += saved_count
                         
                         if saved_count > 0:
-                            status_log.write(f"✅ {p['nick']}: +{saved_count} novas partidas salvas!")
+                            status_log.write(f"✅ {p['nick']}: {flex_count} Flex encontradas -> **+{saved_count} NOVAS salvas!**")
+                        elif flex_count > 0:
+                            status_log.write(f"💤 {p['nick']}: {flex_count} Flex encontradas (Todas já estavam salvas).")
                         else:
-                            status_log.write(f"💤 {p['nick']}: Nenhuma novidade.")
+                            status_log.write(f"⚠️ {p['nick']}: Nenhuma Flex nos últimos {scanned} jogos.")
                     else:
                         status_log.error(f"❌ {p['nick']}: {msg}")
                     
@@ -256,11 +259,11 @@ def render():
                 status_log.update(label="Sincronização Finalizada!", state="complete", expanded=False)
                 
                 if total_novos > 0:
-                    st.success(f"Sucesso! {total_novos} novas partidas adicionadas ao histórico.")
+                    st.success(f"Banco atualizado com {total_novos} novas partidas.")
                     time.sleep(2)
                     st.rerun()
                 else:
-                    st.info("O banco de dados já está atualizado com as últimas partidas.")
+                    st.info("Nenhuma partida nova. O banco já está em dia.")
 
         else:
             file = st.file_uploader("Upload Print", type=['png','jpg'])
@@ -285,7 +288,6 @@ def render():
     todos = sorted(list(set(NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper()) for p in SQUAD_LIST)))
     df_f = df[df['Tipo'] != 'Custom'] if not df.empty else pd.DataFrame()
 
-    # ABAS
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🏆 RANKING", "🎖️ MEDALHAS", "📊 TRANSPARÊNCIA", "⚖️ ELOS", "⚓ AFUNDAMENTO", "🚪 QUEM SAI?", "👹 CUSTOMS"])
 
     with t1:
@@ -326,7 +328,6 @@ def render():
         if not df_f.empty:
             st.subheader("📊 Raio-X da Pontuação (Médias por Partida)")
             df_audit = df_f.copy()
-            # Mostra o valor calculado pelos pesos
             df_audit['Pts_KP (+40)'] = df_audit['Part'] * 40
             df_audit['Pts_DPM (/100)'] = df_audit['DPM'] / 100
             df_audit['Pts_Torre (/500)'] = df_audit['Dano_Estruturas'] / 500
@@ -341,6 +342,7 @@ def render():
 
     with t4:
         if not df_f.empty:
+            # Pega o último registro de Rank válido
             elo = df_f[df_f['RankRiot'] != 'Unranked'].sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
             elo_all = df_f.sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
             elo_all.update(elo)
@@ -357,14 +359,13 @@ def render():
             df_sq = df_f[df_f['MatchID'].isin(squad_matches)]
             
             if not df_sq.empty:
-                # Filtro de equilíbrio: Mínimo 5 jogos para não distorcer a %
                 counts = df_sq['Jogador'].value_counts()
+                # Filtro mínimo de 5 jogos para não distorcer estatística
                 validos = counts[counts >= 5].index.tolist()
                 df_bal = df_sq[df_sq['Jogador'].isin(validos)]
                 
                 if not df_bal.empty:
                     wr = df_bal.groupby('Jogador')['Vitoria'].mean()
-                    # Taxa de Derrota = 1 - Winrate
                     lr = ((1 - wr) * 100).reset_index(name='Taxa de Derrota (%)').sort_values('Taxa de Derrota (%)', ascending=False)
                     st.plotly_chart(px.bar(lr, x='Jogador', y='Taxa de Derrota (%)', color='Taxa de Derrota (%)', template='plotly_dark', color_continuous_scale='Reds'), use_container_width=True)
                     st.caption("Gráfico mostra a % de jogos perdidos quando em grupo (mín. 5 partidas).")
