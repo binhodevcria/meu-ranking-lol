@@ -81,20 +81,4 @@ class DatabaseAdapter:
             pass
     
     def get_all(self):
-        # Tenta ler. Se der erro (arquivo corrompido), recria.
-        try:
-            return pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
-        except Exception as e:
-            st.warning("Banco de dados corrompido detectado. Resetando arquivo...")
-            self._create_db()
-            return pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
-    
-    def save(self, stats: MatchStats):
-        try:
-            df = self.get_all()
-            # LÓGICA DE UNICIDADE COMPOSTA: ID + JOGADOR
-            # Isso permite salvar a mesma partida para jogadores diferentes
-            already_exists = ((df['MatchID'] == str(stats.MatchID)) & 
-                              (df['Jogador'] == stats.Jogador)).any()
-
-            if not already_exists
+        # Tenta ler. Se der erro (arquivo corrompido), rec
