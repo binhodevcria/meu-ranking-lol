@@ -17,10 +17,7 @@ from typing import Optional
 # ==============================================================================
 # 0. CONFIGURAÇÕES
 # ==============================================================================
-# Volta para a lógica simples: Baixa um lote fixo de partidas recentes por vez
 BATCH_SIZE = 20 
-
-# O Ranking olha apenas para as últimas 15 partidas acumuladas (Janela Competitiva)
 RANKING_WINDOW = 15 
 
 SQUAD_LIST = [
@@ -63,7 +60,6 @@ st.markdown("""
         box-shadow: 0 4px 10px rgba(0,0,0,0.5);
     }
     
-    /* Cor verde para valores de destaque */
     div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
         color: #00ff00 !important;
     }
@@ -97,7 +93,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. MOTORES (SCORE COMPLEXO COM NOVAS FEATURES)
+# 2. MOTORES
 # ==============================================================================
 class MatchStats(BaseModel):
     MatchID: str; Data: str; Timestamp: float; Jogador: str; Tipo: str
@@ -108,36 +104,33 @@ class MatchStats(BaseModel):
 
 class BravuraEngine:
     @staticmethod
-    def calculate_score(vitoria, d, part, dano_est, dano_camp, minutos, pinks, solo_kills, plates, multi_score):
+    def calculate_performance_score(vitoria, part, dano_est, dano_camp, minutos, pinks, solo_kills, plates, multi_score):
+        """Calcula APENAS a performance positiva (sem penalidades)"""
         if minutos < 10: return 0.0
         
         # 1. Base
         score = 25.0 if vitoria else 0.0
         
-        # 2. Performance Padrão
+        # 2. Performance
         dpm = dano_camp / minutos if minutos > 0 else 0
-        score += (part * 40)
-        score += (dpm / 100)
-        score += (dano_est / 500)
-        score += (pinks * 2.0)  # Visão Valorizada
+        score += (part * 40)       # KP
+        score += (dpm / 100)       # Dano
+        score += (dano_est / 500)  # Objetivos
+        score += (pinks * 2.0)     # Visão (X2)
         
-        # 3. Novas Features (Agressividade)
-        score += (solo_kills * 2.0)
-        score += (plates * 1.0)
-        score += multi_score
-
-        # 4. Punições
-        if d <= 2 and part < 0.35: score -= 25.0 # KDA Player
-        if dpm < 300: score -= 10.0 # Pacifista
+        # 3. Agressividade Extra
+        score += (solo_kills * 2.0) # X1
+        score += (plates * 1.0)     # Placas
+        score += multi_score        # Multikills
 
         return round(score, 2)
 
 def get_rank_bravura(media):
     if pd.isna(media) or media == 0: return "💤 Inativo"
-    if media < 25: return "🛡️ Defesa"
-    if media < 45: return "🌿 Herbívoro"
-    if media < 65: return "🤝 Honra Tentou"
-    if media < 85: return "⚔️ Ofensivo"
+    if media < 20: return "🛡️ Defesa"
+    if media < 40: return "🌿 Herbívoro"
+    if media < 60: return "🤝 Honra Tentou"
+    if media < 80: return "⚔️ Ofensivo"
     return "💉 Viciado em Dopamina"
 
 # ==============================================================================
@@ -192,12 +185,12 @@ class DatabaseAdapter:
         return True
 
 # ==============================================================================
-# 4. API RIOT (LÓGICA SIMPLES + FEATURES NOVAS)
+# 4. API RIOT
 # ==============================================================================
 class RiotAdapter:
     def __init__(self, api_key):
         self.headers = {"X-Riot-Token": api_key}
-        self.season_start = 1735689600000 # 2026 em MS
+        self.season_start = 1735689600000 
 
     def request_blindado(self, url):
         for i in range(3):
@@ -230,7 +223,6 @@ class RiotAdapter:
             puuid = acc['puuid']
             rank_atual = self.fetch_rank(puuid)
             
-            # Baixa as últimas BATCH_SIZE partidas Flex
             url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={1735689600}&start=0&count={BATCH_SIZE}"
             m_ids = self.request_blindado(url)
             
@@ -246,12 +238,13 @@ class RiotAdapter:
                     if p:
                         mins = d['info']['gameDuration']/60
                         
-                        # Extração de Novas Métricas
                         solo_kills = p.get('challenges', {}).get('soloKills', 0)
                         plates = p.get('challenges', {}).get('turretPlatesTaken', 0)
+                        
                         multi_score = (p.get('doubleKills', 0)*1) + (p.get('tripleKills', 0)*3) + (p.get('quadraKills', 0)*5) + (p.get('pentaKills', 0)*10)
 
-                        sc = BravuraEngine.calculate_score(
+                        # Salva score SEM penalidade (Penalidade é aplicada no agregado)
+                        sc = BravuraEngine.calculate_performance_score(
                             p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), 
                             p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, 
                             p['visionWardsBoughtInGame'], solo_kills, plates, multi_score
@@ -293,8 +286,8 @@ def render():
         
         if acao == "Sincronizar Squad (API)":
             if st.button(f"🔄 Sincronizar (Últimas {BATCH_SIZE})"):
-                log = st.status("Buscando partidas recentes...", expanded=True)
-                total_novos = 0
+                log = st.status("Verificando partidas recentes...", expanded=True)
+                total_added = 0
                 for p in SQUAD_LIST:
                     log.write(f"🔎 **{p['nick']}**...")
                     matches, count, msg = riot.fetch_recent_flex(p['nick'], p['tag'])
@@ -302,13 +295,13 @@ def render():
                         saved = 0
                         for m in matches:
                             if db.save(m): saved += 1
-                        total_novos += saved
+                        total_added += saved
                         if saved > 0: log.write(f"✅ +{saved} novos!")
                     else: log.error(f"❌ Erro: {msg}")
                     time.sleep(0.2)
                 log.update(label="Fim!", state="complete", expanded=False)
-                if total_novos > 0:
-                    st.success(f"{total_novos} partidas adicionadas!")
+                if total_added > 0:
+                    st.success(f"{total_added} partidas adicionadas!")
                     time.sleep(2)
                     st.rerun()
                 else: st.info("Tudo em dia.")
@@ -325,41 +318,81 @@ def render():
 
     df_ranking = pd.DataFrame()
     if not df_f.empty:
-        # Filtra as últimas X partidas para calcular os destaques
+        # Filtra as últimas X partidas
         df_ranking = df_f.sort_values('Timestamp', ascending=False).groupby('Jogador').head(RANKING_WINDOW)
+
+    # --- LÓGICA DE AGREGADO (MÉDIA) ---
+    ranking_data = []
+    if not df_ranking.empty:
+        for p in todos:
+            d = df_ranking[df_ranking['Jogador'] == p]
+            if d.empty: continue
+            
+            # Médias dos Componentes
+            avg_win = d['Vitoria'].mean() * 25.0
+            avg_kp = d['Part'].mean() * 40.0
+            avg_dpm = d['DPM'].mean() / 100.0
+            avg_obj = d['Dano_Estruturas'].mean() / 500.0
+            avg_vis = d['Pinks'].mean() * 2.0
+            avg_x1 = d['SoloKills'].mean() * 2.0
+            avg_plates = d['Plates'].mean() * 1.0
+            avg_multi = d['Multikills'].mean() 
+            
+            # Soma Base
+            final_score = avg_win + avg_kp + avg_dpm + avg_obj + avg_vis + avg_x1 + avg_plates + avg_multi
+            
+            # Penalidades na MÉDIA (Holística)
+            penalidade = 0.0
+            
+            # KDA Player: Média de Mortes <= 2 E Média de KP < 35%
+            avg_deaths_raw = d['D'].mean()
+            avg_kp_raw = d['Part'].mean()
+            
+            if avg_deaths_raw <= 2.0 and avg_kp_raw < 0.35:
+                penalidade -= 25.0
+            
+            # Pacifista: Média de DPM < 300
+            if d['DPM'].mean() < 300:
+                penalidade -= 10.0
+            
+            final_score += penalidade
+            
+            ranking_data.append({
+                'Jogador': p,
+                'Score Final': final_score,
+                'DPM': d['DPM'].mean(),
+                'Max_DPM': d['DPM'].max(),
+                'Total_X1': d['SoloKills'].sum(),
+                'Jogos': len(d),
+                'Penalidade': penalidade
+            })
+            
+    df_final = pd.DataFrame(ranking_data).sort_values('Score Final', ascending=False)
 
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🏆 RANKING", "🎖️ MEDALHAS", "📊 TRANSPARÊNCIA", "⚖️ ELOS", "⚓ AFUNDAMENTO", "🚪 QUEM SAI?", "👹 CUSTOMS"])
 
     with t1:
-        if not df_ranking.empty:
+        if not df_final.empty:
             k1, k2, k3, k4 = st.columns(4)
             
-            # CARD 1: MVP
-            mvp_name = df_ranking.groupby('Jogador')['Score'].mean().idxmax()
-            mvp_val = df_ranking.groupby('Jogador')['Score'].mean().max()
-            k1.metric("🔥 MVP (Média)", mvp_name, f"{mvp_val:.1f}")
+            mvp_row = df_final.iloc[0]
+            k1.metric("🔥 MVP (Score)", mvp_row['Jogador'], f"{mvp_row['Score Final']:.1f}")
             
-            # CARD 2: MAIOR DANO (PICO)
-            max_dpm_idx = df_ranking['DPM'].idxmax()
-            k2.metric("💀 Maior Dano (Pico)", df_ranking.loc[max_dpm_idx, 'Jogador'], f"{df_ranking.loc[max_dpm_idx, 'DPM']:.0f}")
+            # Maior Dano (Pico)
+            dmg_king = df_final.loc[df_final['Max_DPM'].idxmax()]
+            k2.metric("💀 Maior Dano (Pico)", dmg_king['Jogador'], f"{dmg_king['Max_DPM']:.0f}")
             
-            # CARD 3: CIRCO (REI DO X1)
-            solo_sum = df_ranking.groupby('Jogador')['SoloKills'].sum()
-            k3.metric("🎪 Circo (Rei X1)", solo_sum.idxmax(), f"{int(solo_sum.max())} Kills")
+            # Circo (Total X1 na janela)
+            x1_king = df_final.loc[df_final['Total_X1'].idxmax()]
+            k3.metric("🎪 Circo (Rei X1)", x1_king['Jogador'], f"{int(x1_king['Total_X1'])} Kills")
             
-            # CARD 4: INFO
-            k4.metric("⚖️ Janela Ranking", f"Últimas {RANKING_WINDOW}")
+            k4.metric("⚖️ Janela", f"Últimas {RANKING_WINDOW}")
             
             st.markdown("---")
             c1, c2 = st.columns([1.5, 2])
             with c1:
-                stats = []
-                for p in todos:
-                    d = df_ranking[df_ranking['Jogador'] == p]
-                    stats.append({'Jogador': p, 'Média': d['Score'].mean() if not d.empty else 0, 'Jogos': len(d)})
-                lb = pd.DataFrame(stats).sort_values('Média', ascending=False)
-                lb['Rank'] = lb['Média'].apply(get_rank_bravura)
-                st.dataframe(lb[['Jogador', 'Rank', 'Média', 'Jogos']].style.background_gradient(cmap='YlOrRd', subset=['Média']), use_container_width=True)
+                df_final['Rank'] = df_final['Score Final'].apply(get_rank_bravura)
+                st.dataframe(df_final[['Jogador', 'Rank', 'Score Final', 'Jogos']].style.background_gradient(cmap='YlOrRd', subset=['Score Final']), use_container_width=True)
             with c2:
                 df_hist = df_f.sort_values('Timestamp')
                 df_hist['Acumulado'] = df_hist.groupby('Jogador')['Score'].cumsum()
@@ -384,32 +417,19 @@ def render():
             except: st.warning("Dados insuficientes.")
 
     with t3:
-        if not df_ranking.empty:
-            st.subheader(f"📊 Auditoria (Média na Janela de {RANKING_WINDOW})")
-            df_a = df_ranking.copy()
-            df_a['Pts_KP'] = df_a['Part'] * 40
-            df_a['Pts_Dano'] = df_a['DPM'] / 100
-            df_a['Pts_Torre'] = df_a['Dano_Estruturas'] / 500
-            df_a['Pts_Visao'] = df_a['Pinks'] * 2.0
-            df_a['Pts_X1'] = df_a['SoloKills'] * 2.0
-            df_a['Penalidade'] = 0
-            # Aplica penalidade agregada (simulação para visualização)
-            df_a['Penalidade'] = np.where((df_a['D'] <= 2) & (df_a['Part'] < 0.35), -25, 0)
-            df_a['Penalidade'] += np.where(df_a['DPM'] < 300, -10, 0)
-            
-            audit = df_a.groupby('Jogador').agg({
-                'Score': 'mean', 'Pts_KP': 'mean', 'Pts_Dano': 'mean', 
-                'Pts_Torre': 'mean', 'Pts_Visao': 'mean', 'Pts_X1': 'mean', 'Penalidade': 'mean'
-            }).round(2).sort_values('Score', ascending=False)
-            st.dataframe(audit, use_container_width=True)
+        if not df_final.empty:
+            st.subheader("📊 Auditoria (Cálculo Agregado)")
+            # Exibe os dados já calculados no loop principal
+            cols = ['Jogador', 'Score Final', 'Penalidade', 'Total_X1', 'DPM']
+            st.dataframe(df_final[cols].sort_values('Score Final', ascending=False), use_container_width=True)
 
     with t4:
         if not df_f.empty:
             elo = df_f.sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
-            media = df_ranking.groupby('Jogador')['Score'].mean()
-            comp = pd.DataFrame({'Riot': elo['RankRiot'], 'Score': media})
-            comp['Rank Deidara'] = comp['Score'].apply(get_rank_bravura)
-            st.dataframe(comp.sort_values('Score', ascending=False), use_container_width=True)
+            comp = df_final[['Jogador', 'Score Final']].set_index('Jogador')
+            comp['Riot'] = elo['RankRiot']
+            comp['Rank Deidara'] = comp['Score Final'].apply(get_rank_bravura)
+            st.dataframe(comp.sort_values('Score Final', ascending=False), use_container_width=True)
 
     with t5:
         if not df_f.empty:
