@@ -15,10 +15,10 @@ from urllib.parse import quote
 from typing import Optional
 
 # ==============================================================================
-# 0. CONFIGURAÇÕES (LÓGICA V18)
+# 0. CONFIGURAÇÕES (LÓGICA V18 + AGREGADO)
 # ==============================================================================
 BATCH_SIZE = 20 
-RANKING_WINDOW = 15 
+RANKING_WINDOW = 15 # Janela de análise para o Agregado
 
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
@@ -100,13 +100,15 @@ class MatchStats(BaseModel):
 class BravuraEngine:
     @staticmethod
     def calculate_score(vitoria, d, part, dano_est, dano_camp, minutos, pinks):
+        # Esta função calcula o score INDIVIDUAL da partida (para histórico e gráficos)
         if minutos < 10: return 0.0
         score = 25.0 if vitoria else 0.0
         score += (part * 40)
         dpm = dano_camp / minutos if minutos > 0 else 0
         score += (dpm / 100)
         score += (dano_est / 500)
-        score += (pinks * 2.0) # VISÃO BUFFADA PARA 2.0
+        score += (pinks * 2.0)
+        # Penalidade Individual (Ainda existe no histórico, mas não no ranking agregado)
         if d <= 2 and part < 0.35: score -= 25.0
         return round(score, 2)
 
@@ -294,46 +296,91 @@ def render():
     todos = sorted(list(set(NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper()) for p in SQUAD_LIST)))
     df_f = df[df['Tipo'] != 'Custom'] if not df.empty else pd.DataFrame()
 
-    df_ranking = pd.DataFrame()
+    # --- PROCESSAMENTO AGREGADO (HOLÍSTICO) ---
+    ranking_data = []
+    
+    # Separa as últimas 15 partidas por jogador
+    df_window = pd.DataFrame()
     if not df_f.empty:
-        df_ranking = df_f.sort_values('Timestamp', ascending=False).groupby('Jogador').head(RANKING_WINDOW)
+        df_window = df_f.sort_values('Timestamp', ascending=False).groupby('Jogador').head(RANKING_WINDOW)
+    
+    # Calcula os scores AGREGADOS (Média do comportamento e não média dos scores)
+    for p in todos:
+        d = df_window[df_window['Jogador'] == p]
+        if d.empty: continue
+        
+        # 1. Vitórias (25 pts se 100% winrate)
+        win_rate = d['Vitoria'].mean()
+        pts_win = 25.0 * win_rate
+        
+        # 2. Participação (Média * 40)
+        avg_kp = d['Part'].mean()
+        pts_kp = avg_kp * 40.0
+        
+        # 3. Dano (Média / 100)
+        avg_dpm = d['DPM'].mean()
+        pts_dpm = avg_dpm / 100.0
+        
+        # 4. Torre (Média / 500)
+        avg_tower = d['Dano_Estruturas'].mean()
+        pts_tower = avg_tower / 500.0
+        
+        # 5. Visão (Média * 2.0)
+        avg_vision = d['Pinks'].mean()
+        pts_vision = avg_vision * 2.0
+        
+        # 6. PENALIDADE AGREGADA
+        # Só pune se a MÉDIA de mortes for baixa E a MÉDIA de participação for baixa
+        avg_deaths = d['D'].mean()
+        penalidade = 0.0
+        if avg_deaths <= 2.0 and avg_kp < 0.35:
+            penalidade = -25.0
+            
+        final_score = pts_win + pts_kp + pts_dpm + pts_tower + pts_vision + penalidade
+        
+        ranking_data.append({
+            'Jogador': p,
+            'Score Agregado': final_score,
+            'Jogos': len(d),
+            'DPM': avg_dpm, # Média para tabela
+            'Max_DPM': d['DPM'].max(), # Máximo para destaque
+            'Pts_KP': pts_kp,
+            'Pts_Dano': pts_dpm,
+            'Pts_Torre': pts_tower,
+            'Pts_Visao': pts_vision,
+            'Penalidade': penalidade
+        })
+        
+    df_ranking_final = pd.DataFrame(ranking_data)
 
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🏆 RANKING", "🎖️ MEDALHAS", "📊 TRANSPARÊNCIA", "⚖️ ELOS", "⚓ AFUNDAMENTO", "🚪 QUEM SAI?", "👹 CUSTOMS"])
 
     with t1:
-        if not df_ranking.empty:
+        if not df_ranking_final.empty:
             k1, k2, k3, k4 = st.columns(4)
             
-            # CARD 1: MVP (Maior Média)
-            mvp_name = df_ranking.groupby('Jogador')['Score'].mean().idxmax()
-            mvp_val = df_ranking.groupby('Jogador')['Score'].mean().max()
-            k1.metric("🔥 MVP (Média)", mvp_name, f"{mvp_val:.1f}")
+            # CARD 1: MVP (Maior Score Agregado)
+            mvp_row = df_ranking_final.loc[df_ranking_final['Score Agregado'].idxmax()]
+            k1.metric("🔥 MVP (Score)", mvp_row['Jogador'], f"{mvp_row['Score Agregado']:.1f}")
             
-            # CARD 2: MAIOR DANO (Maior valor único na janela)
-            idx_max_dmg = df_ranking['DPM'].idxmax()
-            player_max_dmg = df_ranking.loc[idx_max_dmg, 'Jogador']
-            val_max_dmg = df_ranking.loc[idx_max_dmg, 'DPM']
-            k2.metric("💀 Maior Dano", player_max_dmg, f"{val_max_dmg:.0f}")
+            # CARD 2: MAIOR DANO (Pico Único na Janela)
+            # Encontra quem teve o maior pico de dano em uma partida
+            dmg_king_row = df_ranking_final.loc[df_ranking_final['Max_DPM'].idxmax()]
+            k2.metric("💀 Maior Dano (Pico)", dmg_king_row['Jogador'], f"{dmg_king_row['Max_DPM']:.0f}")
             
             # CARD 3: VICIADO
-            viciado_name = df_ranking['Jogador'].value_counts().idxmax()
-            viciado_qtd = df_ranking['Jogador'].value_counts().max()
-            total_db = len(df_f)
-            k3.metric("🎮 Viciado (15 games)", viciado_name, f"{viciado_qtd} Jogos (DB: {total_db})")
+            viciado_row = df_ranking_final.loc[df_ranking_final['Jogos'].idxmax()]
+            k3.metric("🎮 Viciado", viciado_row['Jogador'], f"{viciado_row['Jogos']} Jogos (Janela)")
             
-            # CARD 4: INFO
             k4.metric("⚖️ Janela Ranking", f"Últimas {RANKING_WINDOW}")
             
             st.markdown("---")
             c1, c2 = st.columns([1.5, 2])
             with c1:
-                stats = []
-                for p in todos:
-                    d = df_ranking[df_ranking['Jogador'] == p]
-                    stats.append({'Jogador': p, 'Média': d['Score'].mean() if not d.empty else 0, 'Jogos (Janela)': len(d)})
-                lb = pd.DataFrame(stats).sort_values('Média', ascending=False)
-                lb['Rank'] = lb['Média'].apply(get_rank_bravura)
-                st.dataframe(lb[['Jogador', 'Rank', 'Média', 'Jogos (Janela)']].style.background_gradient(cmap='YlOrRd', subset=['Média']), use_container_width=True)
+                # Tabela ordenada por Score Agregado
+                lb = df_ranking_final.sort_values('Score Agregado', ascending=False)
+                lb['Rank'] = lb['Score Agregado'].apply(get_rank_bravura)
+                st.dataframe(lb[['Jogador', 'Rank', 'Score Agregado', 'Jogos']].style.background_gradient(cmap='YlOrRd', subset=['Score Agregado']), use_container_width=True)
             with c2:
                 df_hist = df_f.sort_values('Timestamp')
                 df_hist['Acumulado'] = df_hist.groupby('Jogador')['Score'].cumsum()
@@ -358,28 +405,20 @@ def render():
             except: st.warning("Dados insuficientes para medalhas.")
 
     with t3:
-        if not df_ranking.empty:
-            st.subheader(f"📊 Auditoria (Baseada nas últimas {RANKING_WINDOW} partidas)")
-            df_a = df_ranking.copy()
-            df_a['Pts_KP'] = df_a['Part'] * 40
-            df_a['Pts_Dano'] = df_a['DPM'] / 100
-            df_a['Pts_Torre'] = df_a['Dano_Estruturas'] / 500
-            df_a['Pts_Visao'] = df_a['Pinks'] * 2 # ATUALIZADO PARA 2.0 AQUI TAMBÉM
-            df_a['Penalidade'] = np.where((df_a['D'] <= 2) & (df_a['Part'] < 0.35), -25, 0)
-            
-            audit = df_a.groupby('Jogador').agg({
-                'Score': 'mean', 'Pts_KP': 'mean', 'Pts_Dano': 'mean', 
-                'Pts_Torre': 'mean', 'Pts_Visao': 'mean', 'Penalidade': 'mean'
-            }).round(2).sort_values('Score', ascending=False)
-            st.dataframe(audit, use_container_width=True)
+        if not df_ranking_final.empty:
+            st.subheader(f"📊 Auditoria (Cálculo Agregado)")
+            # Exibe os dados calculados no loop principal (Agregados)
+            audit_cols = ['Jogador', 'Score Agregado', 'Pts_KP', 'Pts_Dano', 'Pts_Torre', 'Pts_Visao', 'Penalidade']
+            st.dataframe(df_ranking_final[audit_cols].sort_values('Score Agregado', ascending=False).round(2), use_container_width=True)
 
     with t4:
         if not df_f.empty:
             elo = df_f.sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
-            media = df_ranking.groupby('Jogador')['Score'].mean() 
-            comp = pd.DataFrame({'Riot': elo['RankRiot'], 'Score (Janela)': media})
-            comp['Rank Deidara'] = comp['Score (Janela)'].apply(get_rank_bravura)
-            st.dataframe(comp.sort_values('Score (Janela)', ascending=False), use_container_width=True)
+            # Usa o Score Agregado para comparar
+            comp = df_ranking_final[['Jogador', 'Score Agregado']].set_index('Jogador')
+            comp['Riot Flex'] = elo['RankRiot']
+            comp['Rank Deidara'] = comp['Score Agregado'].apply(get_rank_bravura)
+            st.dataframe(comp.sort_values('Score Agregado', ascending=False), use_container_width=True)
 
     with t5:
         if not df_f.empty:
