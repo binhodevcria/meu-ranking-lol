@@ -15,10 +15,13 @@ from urllib.parse import quote
 from typing import Optional
 
 # ==============================================================================
-# 0. CONFIGURAÇÕES (LÓGICA V18 + AGREGADO)
+# 0. CONFIGURAÇÕES
 # ==============================================================================
+# Volta para a lógica simples: Baixa um lote fixo de partidas recentes por vez
 BATCH_SIZE = 20 
-RANKING_WINDOW = 15 # Janela de análise para o Agregado
+
+# O Ranking olha apenas para as últimas 15 partidas acumuladas (Janela Competitiva)
+RANKING_WINDOW = 15 
 
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
@@ -60,6 +63,11 @@ st.markdown("""
         box-shadow: 0 4px 10px rgba(0,0,0,0.5);
     }
     
+    /* Cor verde para valores de destaque */
+    div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
+        color: #00ff00 !important;
+    }
+
     .medal-box {
         background: linear-gradient(145deg, #1e2328, #1a1c24); 
         border: 1px solid #c8aa6e; 
@@ -89,35 +97,47 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. MOTORES
+# 2. MOTORES (SCORE COMPLEXO COM NOVAS FEATURES)
 # ==============================================================================
 class MatchStats(BaseModel):
     MatchID: str; Data: str; Timestamp: float; Jogador: str; Tipo: str
     Vitoria: bool; Score: float; K: int; D: int; A: int; Part: float
     Dano_Estruturas: int; DPM: float; Pinks: int
+    SoloKills: int; Plates: int; Multikills: int
     RankRiot: Optional[str] = "Unranked"
 
 class BravuraEngine:
     @staticmethod
-    def calculate_score(vitoria, d, part, dano_est, dano_camp, minutos, pinks):
-        # Esta função calcula o score INDIVIDUAL da partida (para histórico e gráficos)
+    def calculate_score(vitoria, d, part, dano_est, dano_camp, minutos, pinks, solo_kills, plates, multi_score):
         if minutos < 10: return 0.0
+        
+        # 1. Base
         score = 25.0 if vitoria else 0.0
-        score += (part * 40)
+        
+        # 2. Performance Padrão
         dpm = dano_camp / minutos if minutos > 0 else 0
+        score += (part * 40)
         score += (dpm / 100)
         score += (dano_est / 500)
-        score += (pinks * 2.0)
-        # Penalidade Individual (Ainda existe no histórico, mas não no ranking agregado)
-        if d <= 2 and part < 0.35: score -= 25.0
+        score += (pinks * 2.0)  # Visão Valorizada
+        
+        # 3. Novas Features (Agressividade)
+        score += (solo_kills * 2.0)
+        score += (plates * 1.0)
+        score += multi_score
+
+        # 4. Punições
+        if d <= 2 and part < 0.35: score -= 25.0 # KDA Player
+        if dpm < 300: score -= 10.0 # Pacifista
+
         return round(score, 2)
 
 def get_rank_bravura(media):
     if pd.isna(media) or media == 0: return "💤 Inativo"
-    if media < 20: return "🛡️ Defesa"
-    if media < 40: return "🌿 Herbívoro"
-    if media < 60: return "🤝 Honra Tentou"
-    if media < 80: return "⚔️ Ofensivo"
+    if media < 25: return "🛡️ Defesa"
+    if media < 45: return "🌿 Herbívoro"
+    if media < 65: return "🤝 Honra Tentou"
+    if media < 85: return "⚔️ Ofensivo"
     return "💉 Viciado em Dopamina"
 
 # ==============================================================================
@@ -132,9 +152,15 @@ class DatabaseAdapter:
         else:
             try:
                 df = pd.read_csv(self.FILE_DB)
+                changed = False
+                for col in ['SoloKills', 'Plates', 'Multikills']:
+                    if col not in df.columns:
+                        df[col] = 0
+                        changed = True
                 if 'RankRiot' not in df.columns:
                     df['RankRiot'] = 'Unranked'
-                    df.to_csv(self.FILE_DB, index=False)
+                    changed = True
+                if changed: df.to_csv(self.FILE_DB, index=False)
             except: pass
 
     def get_all(self):
@@ -142,8 +168,9 @@ class DatabaseAdapter:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
             if df.empty: return pd.DataFrame()
             df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(str(x).upper(), str(x).upper()))
-            num_cols = ['Score', 'K', 'D', 'A', 'Part', 'DPM', 'Dano_Estruturas', 'Pinks', 'Timestamp']
-            for c in num_cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+            num_cols = ['Score', 'K', 'D', 'A', 'Part', 'DPM', 'Dano_Estruturas', 'Pinks', 'Timestamp', 'SoloKills', 'Plates', 'Multikills']
+            for c in num_cols: 
+                if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
             return df
         except: return pd.DataFrame()
 
@@ -165,12 +192,12 @@ class DatabaseAdapter:
         return True
 
 # ==============================================================================
-# 4. API RIOT
+# 4. API RIOT (LÓGICA SIMPLES + FEATURES NOVAS)
 # ==============================================================================
 class RiotAdapter:
     def __init__(self, api_key):
         self.headers = {"X-Riot-Token": api_key}
-        self.season_start = 1735689600 
+        self.season_start = 1735689600000 # 2026 em MS
 
     def request_blindado(self, url):
         for i in range(3):
@@ -201,10 +228,10 @@ class RiotAdapter:
             acc = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n}/{t}")
             if not acc: return None, 0, "Conta não achada"
             puuid = acc['puuid']
-            
             rank_atual = self.fetch_rank(puuid)
             
-            url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={self.season_start}&start=0&count={BATCH_SIZE}"
+            # Baixa as últimas BATCH_SIZE partidas Flex
+            url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={1735689600}&start=0&count={BATCH_SIZE}"
             m_ids = self.request_blindado(url)
             
             if not m_ids: return [], 0, "Sem Flex Recente"
@@ -213,10 +240,23 @@ class RiotAdapter:
             for m_id in m_ids:
                 d = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}")
                 if d:
+                    if d['info']['gameCreation'] < self.season_start: continue
+
                     p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
                     if p:
                         mins = d['info']['gameDuration']/60
-                        sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
+                        
+                        # Extração de Novas Métricas
+                        solo_kills = p.get('challenges', {}).get('soloKills', 0)
+                        plates = p.get('challenges', {}).get('turretPlatesTaken', 0)
+                        multi_score = (p.get('doubleKills', 0)*1) + (p.get('tripleKills', 0)*3) + (p.get('quadraKills', 0)*5) + (p.get('pentaKills', 0)*10)
+
+                        sc = BravuraEngine.calculate_score(
+                            p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), 
+                            p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, 
+                            p['visionWardsBoughtInGame'], solo_kills, plates, multi_score
+                        )
+                        
                         data.append(MatchStats(
                             MatchID=str(m_id), 
                             Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), 
@@ -229,6 +269,7 @@ class RiotAdapter:
                             Dano_Estruturas=p['damageDealtToBuildings'], 
                             DPM=round(p['totalDamageDealtToChampions']/mins, 2), 
                             Pinks=p['visionWardsBoughtInGame'], 
+                            SoloKills=solo_kills, Plates=plates, Multikills=multi_score,
                             RankRiot=rank_atual
                         ))
                 time.sleep(0.1)
@@ -251,8 +292,8 @@ def render():
         acao = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
         
         if acao == "Sincronizar Squad (API)":
-            if st.button(f"🔄 Sincronizar (Recentes)"):
-                log = st.status("Verificando partidas recentes...", expanded=True)
+            if st.button(f"🔄 Sincronizar (Últimas {BATCH_SIZE})"):
+                log = st.status("Buscando partidas recentes...", expanded=True)
                 total_novos = 0
                 for p in SQUAD_LIST:
                     log.write(f"🔎 **{p['nick']}**...")
@@ -262,29 +303,15 @@ def render():
                         for m in matches:
                             if db.save(m): saved += 1
                         total_novos += saved
-                        if saved > 0: log.write(f"✅ +{saved} novas!")
+                        if saved > 0: log.write(f"✅ +{saved} novos!")
                     else: log.error(f"❌ Erro: {msg}")
                     time.sleep(0.2)
                 log.update(label="Fim!", state="complete", expanded=False)
                 if total_novos > 0:
-                    st.success(f"{total_novos} adicionadas!")
+                    st.success(f"{total_novos} partidas adicionadas!")
                     time.sleep(2)
                     st.rerun()
                 else: st.info("Tudo em dia.")
-        
-        else:
-            file = st.file_uploader("Upload Print", type=['png','jpg'])
-            p_name = st.text_input("Nick").upper()
-            if st.button("🤖 Analisar") and file and gemini:
-                try:
-                    prompt = f"Extraia stats LoL JSON para {p_name}: {{'vitoria':bool,'k':int,'d':int,'a':int,'part':float,'dano_est':int,'dano_camp':int,'min':int,'pinks':int}}"
-                    raw = json.loads(gemini.generate_content([prompt, Image.open(file)]).text.replace('```json', '').replace('```', '').strip())
-                    sc = BravuraEngine.calculate_score(raw['vitoria'], raw['d'], raw['part'], raw['dano_est'], raw['dano_camp'], raw['min'], raw['pinks'])
-                    m = MatchStats(MatchID=f"c_{int(time.time())}", Data=datetime.now().strftime('%d/%m'), Timestamp=time.time()*1000, Jogador=p_name, Tipo='Custom', Vitoria=raw['vitoria'], Score=sc, K=raw['k'], D=raw['d'], A=raw['a'], Part=raw['part'], Dano_Estruturas=raw['dano_est'], DPM=round(raw['dano_camp']/raw['min'], 2), Pinks=raw['pinks'], RankRiot="Custom")
-                    db.save(m)
-                    st.success("Salvo!")
-                    st.rerun()
-                except: st.error("Erro no print.")
         
         st.markdown("---")
         with st.expander("🛠️ Admin"):
@@ -296,91 +323,43 @@ def render():
     todos = sorted(list(set(NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper()) for p in SQUAD_LIST)))
     df_f = df[df['Tipo'] != 'Custom'] if not df.empty else pd.DataFrame()
 
-    # --- PROCESSAMENTO AGREGADO (HOLÍSTICO) ---
-    ranking_data = []
-    
-    # Separa as últimas 15 partidas por jogador
-    df_window = pd.DataFrame()
+    df_ranking = pd.DataFrame()
     if not df_f.empty:
-        df_window = df_f.sort_values('Timestamp', ascending=False).groupby('Jogador').head(RANKING_WINDOW)
-    
-    # Calcula os scores AGREGADOS (Média do comportamento e não média dos scores)
-    for p in todos:
-        d = df_window[df_window['Jogador'] == p]
-        if d.empty: continue
-        
-        # 1. Vitórias (25 pts se 100% winrate)
-        win_rate = d['Vitoria'].mean()
-        pts_win = 25.0 * win_rate
-        
-        # 2. Participação (Média * 40)
-        avg_kp = d['Part'].mean()
-        pts_kp = avg_kp * 40.0
-        
-        # 3. Dano (Média / 100)
-        avg_dpm = d['DPM'].mean()
-        pts_dpm = avg_dpm / 100.0
-        
-        # 4. Torre (Média / 500)
-        avg_tower = d['Dano_Estruturas'].mean()
-        pts_tower = avg_tower / 500.0
-        
-        # 5. Visão (Média * 2.0)
-        avg_vision = d['Pinks'].mean()
-        pts_vision = avg_vision * 2.0
-        
-        # 6. PENALIDADE AGREGADA
-        # Só pune se a MÉDIA de mortes for baixa E a MÉDIA de participação for baixa
-        avg_deaths = d['D'].mean()
-        penalidade = 0.0
-        if avg_deaths <= 2.0 and avg_kp < 0.35:
-            penalidade = -25.0
-            
-        final_score = pts_win + pts_kp + pts_dpm + pts_tower + pts_vision + penalidade
-        
-        ranking_data.append({
-            'Jogador': p,
-            'Score Agregado': final_score,
-            'Jogos': len(d),
-            'DPM': avg_dpm, # Média para tabela
-            'Max_DPM': d['DPM'].max(), # Máximo para destaque
-            'Pts_KP': pts_kp,
-            'Pts_Dano': pts_dpm,
-            'Pts_Torre': pts_tower,
-            'Pts_Visao': pts_vision,
-            'Penalidade': penalidade
-        })
-        
-    df_ranking_final = pd.DataFrame(ranking_data)
+        # Filtra as últimas X partidas para calcular os destaques
+        df_ranking = df_f.sort_values('Timestamp', ascending=False).groupby('Jogador').head(RANKING_WINDOW)
 
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🏆 RANKING", "🎖️ MEDALHAS", "📊 TRANSPARÊNCIA", "⚖️ ELOS", "⚓ AFUNDAMENTO", "🚪 QUEM SAI?", "👹 CUSTOMS"])
 
     with t1:
-        if not df_ranking_final.empty:
+        if not df_ranking.empty:
             k1, k2, k3, k4 = st.columns(4)
             
-            # CARD 1: MVP (Maior Score Agregado)
-            mvp_row = df_ranking_final.loc[df_ranking_final['Score Agregado'].idxmax()]
-            k1.metric("🔥 MVP (Score)", mvp_row['Jogador'], f"{mvp_row['Score Agregado']:.1f}")
+            # CARD 1: MVP
+            mvp_name = df_ranking.groupby('Jogador')['Score'].mean().idxmax()
+            mvp_val = df_ranking.groupby('Jogador')['Score'].mean().max()
+            k1.metric("🔥 MVP (Média)", mvp_name, f"{mvp_val:.1f}")
             
-            # CARD 2: MAIOR DANO (Pico Único na Janela)
-            # Encontra quem teve o maior pico de dano em uma partida
-            dmg_king_row = df_ranking_final.loc[df_ranking_final['Max_DPM'].idxmax()]
-            k2.metric("💀 Maior Dano (Pico)", dmg_king_row['Jogador'], f"{dmg_king_row['Max_DPM']:.0f}")
+            # CARD 2: MAIOR DANO (PICO)
+            max_dpm_idx = df_ranking['DPM'].idxmax()
+            k2.metric("💀 Maior Dano (Pico)", df_ranking.loc[max_dpm_idx, 'Jogador'], f"{df_ranking.loc[max_dpm_idx, 'DPM']:.0f}")
             
-            # CARD 3: VICIADO
-            viciado_row = df_ranking_final.loc[df_ranking_final['Jogos'].idxmax()]
-            k3.metric("🎮 Viciado", viciado_row['Jogador'], f"{viciado_row['Jogos']} Jogos (Janela)")
+            # CARD 3: CIRCO (REI DO X1)
+            solo_sum = df_ranking.groupby('Jogador')['SoloKills'].sum()
+            k3.metric("🎪 Circo (Rei X1)", solo_sum.idxmax(), f"{int(solo_sum.max())} Kills")
             
+            # CARD 4: INFO
             k4.metric("⚖️ Janela Ranking", f"Últimas {RANKING_WINDOW}")
             
             st.markdown("---")
             c1, c2 = st.columns([1.5, 2])
             with c1:
-                # Tabela ordenada por Score Agregado
-                lb = df_ranking_final.sort_values('Score Agregado', ascending=False)
-                lb['Rank'] = lb['Score Agregado'].apply(get_rank_bravura)
-                st.dataframe(lb[['Jogador', 'Rank', 'Score Agregado', 'Jogos']].style.background_gradient(cmap='YlOrRd', subset=['Score Agregado']), use_container_width=True)
+                stats = []
+                for p in todos:
+                    d = df_ranking[df_ranking['Jogador'] == p]
+                    stats.append({'Jogador': p, 'Média': d['Score'].mean() if not d.empty else 0, 'Jogos': len(d)})
+                lb = pd.DataFrame(stats).sort_values('Média', ascending=False)
+                lb['Rank'] = lb['Média'].apply(get_rank_bravura)
+                st.dataframe(lb[['Jogador', 'Rank', 'Média', 'Jogos']].style.background_gradient(cmap='YlOrRd', subset=['Média']), use_container_width=True)
             with c2:
                 df_hist = df_f.sort_values('Timestamp')
                 df_hist['Acumulado'] = df_hist.groupby('Jogador')['Score'].cumsum()
@@ -402,23 +381,35 @@ def render():
                 with m2: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🧨</div><div class='medal-title'>DANUDO</div><div class='medal-player'>{p_dmg}</div><span class='medal-desc'>Maior Dano Médio</span></div>", unsafe_allow_html=True)
                 with m3: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🔪</div><div class='medal-title'>DINIZ</div><div class='medal-player'>{p_mvp}</div><span class='medal-desc'>Maior Soma de Pontos</span></div>", unsafe_allow_html=True)
                 with m4: st.markdown(f"<div class='medal-box'><div class='medal-icon'>💀</div><div class='medal-title'>INIMIGO KDA</div><div class='medal-player'>{p_kda}</div><span class='medal-desc'>Quem mais morreu</span></div>", unsafe_allow_html=True)
-            except: st.warning("Dados insuficientes para medalhas.")
+            except: st.warning("Dados insuficientes.")
 
     with t3:
-        if not df_ranking_final.empty:
-            st.subheader(f"📊 Auditoria (Cálculo Agregado)")
-            # Exibe os dados calculados no loop principal (Agregados)
-            audit_cols = ['Jogador', 'Score Agregado', 'Pts_KP', 'Pts_Dano', 'Pts_Torre', 'Pts_Visao', 'Penalidade']
-            st.dataframe(df_ranking_final[audit_cols].sort_values('Score Agregado', ascending=False).round(2), use_container_width=True)
+        if not df_ranking.empty:
+            st.subheader(f"📊 Auditoria (Média na Janela de {RANKING_WINDOW})")
+            df_a = df_ranking.copy()
+            df_a['Pts_KP'] = df_a['Part'] * 40
+            df_a['Pts_Dano'] = df_a['DPM'] / 100
+            df_a['Pts_Torre'] = df_a['Dano_Estruturas'] / 500
+            df_a['Pts_Visao'] = df_a['Pinks'] * 2.0
+            df_a['Pts_X1'] = df_a['SoloKills'] * 2.0
+            df_a['Penalidade'] = 0
+            # Aplica penalidade agregada (simulação para visualização)
+            df_a['Penalidade'] = np.where((df_a['D'] <= 2) & (df_a['Part'] < 0.35), -25, 0)
+            df_a['Penalidade'] += np.where(df_a['DPM'] < 300, -10, 0)
+            
+            audit = df_a.groupby('Jogador').agg({
+                'Score': 'mean', 'Pts_KP': 'mean', 'Pts_Dano': 'mean', 
+                'Pts_Torre': 'mean', 'Pts_Visao': 'mean', 'Pts_X1': 'mean', 'Penalidade': 'mean'
+            }).round(2).sort_values('Score', ascending=False)
+            st.dataframe(audit, use_container_width=True)
 
     with t4:
         if not df_f.empty:
             elo = df_f.sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
-            # Usa o Score Agregado para comparar
-            comp = df_ranking_final[['Jogador', 'Score Agregado']].set_index('Jogador')
-            comp['Riot Flex'] = elo['RankRiot']
-            comp['Rank Deidara'] = comp['Score Agregado'].apply(get_rank_bravura)
-            st.dataframe(comp.sort_values('Score Agregado', ascending=False), use_container_width=True)
+            media = df_ranking.groupby('Jogador')['Score'].mean()
+            comp = pd.DataFrame({'Riot': elo['RankRiot'], 'Score': media})
+            comp['Rank Deidara'] = comp['Score'].apply(get_rank_bravura)
+            st.dataframe(comp.sort_values('Score', ascending=False), use_container_width=True)
 
     with t5:
         if not df_f.empty:
@@ -433,7 +424,7 @@ def render():
                     lr = ((1 - df_b.groupby('Jogador')['Vitoria'].mean()) * 100).reset_index(name='Derrota %').sort_values('Derrota %', ascending=False)
                     st.plotly_chart(px.bar(lr, x='Jogador', y='Derrota %', color='Derrota %', template='plotly_dark', color_continuous_scale='Reds'), use_container_width=True)
                 else: st.info("Necessário 5+ jogos em grupo.")
-            else: st.info("Sem jogos de grupo (3+).")
+            else: st.info("Sem jogos de grupo.")
 
     with t6:
         if not df_f.empty:
