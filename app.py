@@ -80,6 +80,10 @@ st.markdown("""
 
     .title-text { font-size: 3.5em; font-weight: bold; color: #ff4b4b; text-align: center; text-shadow: 2px 2px #000; }
     .subtitle-text { font-size: 1.2em; font-style: italic; color: #a0a0a0; text-align: center; margin-bottom: 30px; }
+    
+    .footer-group { font-size: 1.8em; color: #ffffff; text-align: left; margin-top: 60px; margin-left: 20px; }
+    .footer-final { font-size: 5em; font-weight: bold; color: #d4af37; text-align: center; margin-top: 10px; font-family: 'Impact', sans-serif; letter-spacing: 6px; text-shadow: 3px 3px 0px #000; }
+    
     .stButton>button { background-color: #1e2328; color: #cdbe91; border: 1px solid #463714; font-weight: bold; width: 100%; }
 </style>
 """, unsafe_allow_html=True)
@@ -102,7 +106,7 @@ class BravuraEngine:
         dpm = dano_camp / minutos if minutos > 0 else 0
         score += (dpm / 100)
         score += (dano_est / 500)
-        score += (pinks * 1.0)
+        score += (pinks * 2.0) # VISÃO BUFFADA PARA 2.0
         if d <= 2 and part < 0.35: score -= 25.0
         return round(score, 2)
 
@@ -195,10 +199,14 @@ class RiotAdapter:
             acc = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n}/{t}")
             if not acc: return None, 0, "Conta não achada"
             puuid = acc['puuid']
+            
             rank_atual = self.fetch_rank(puuid)
+            
             url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={self.season_start}&start=0&count={BATCH_SIZE}"
             m_ids = self.request_blindado(url)
+            
             if not m_ids: return [], 0, "Sem Flex Recente"
+            
             data = []
             for m_id in m_ids:
                 d = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}")
@@ -226,7 +234,7 @@ class RiotAdapter:
         except Exception as e: return None, 0, str(e)
 
 # ==============================================================================
-# 5. RENDER
+# 5. RENDER UI
 # ==============================================================================
 def render():
     db = DatabaseAdapter()
@@ -302,13 +310,12 @@ def render():
             k1.metric("🔥 MVP (Média)", mvp_name, f"{mvp_val:.1f}")
             
             # CARD 2: MAIOR DANO (Maior valor único na janela)
-            # Encontra a linha com o maior DPM na janela
             idx_max_dmg = df_ranking['DPM'].idxmax()
             player_max_dmg = df_ranking.loc[idx_max_dmg, 'Jogador']
             val_max_dmg = df_ranking.loc[idx_max_dmg, 'DPM']
             k2.metric("💀 Maior Dano", player_max_dmg, f"{val_max_dmg:.0f}")
             
-            # CARD 3: VICIADO (Quem jogou mais na janela)
+            # CARD 3: VICIADO
             viciado_name = df_ranking['Jogador'].value_counts().idxmax()
             viciado_qtd = df_ranking['Jogador'].value_counts().max()
             total_db = len(df_f)
@@ -357,15 +364,19 @@ def render():
             df_a['Pts_KP'] = df_a['Part'] * 40
             df_a['Pts_Dano'] = df_a['DPM'] / 100
             df_a['Pts_Torre'] = df_a['Dano_Estruturas'] / 500
-            df_a['Pts_Visao'] = df_a['Pinks']
+            df_a['Pts_Visao'] = df_a['Pinks'] * 2 # ATUALIZADO PARA 2.0 AQUI TAMBÉM
             df_a['Penalidade'] = np.where((df_a['D'] <= 2) & (df_a['Part'] < 0.35), -25, 0)
-            audit = df_a.groupby('Jogador').agg({'Score':'mean', 'Pts_KP':'mean', 'Pts_Dano':'mean', 'Pts_Torre':'mean', 'Pts_Visao':'mean', 'Penalidade':'mean'}).round(2).sort_values('Score', ascending=False)
+            
+            audit = df_a.groupby('Jogador').agg({
+                'Score': 'mean', 'Pts_KP': 'mean', 'Pts_Dano': 'mean', 
+                'Pts_Torre': 'mean', 'Pts_Visao': 'mean', 'Penalidade': 'mean'
+            }).round(2).sort_values('Score', ascending=False)
             st.dataframe(audit, use_container_width=True)
 
     with t4:
         if not df_f.empty:
             elo = df_f.sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
-            media = df_ranking.groupby('Jogador')['Score'].mean()
+            media = df_ranking.groupby('Jogador')['Score'].mean() 
             comp = pd.DataFrame({'Riot': elo['RankRiot'], 'Score (Janela)': media})
             comp['Rank Deidara'] = comp['Score (Janela)'].apply(get_rank_bravura)
             st.dataframe(comp.sort_values('Score (Janela)', ascending=False), use_container_width=True)
