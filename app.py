@@ -17,8 +17,8 @@ from typing import Optional
 # ==============================================================================
 # 0. CONFIGURAÇÕES
 # ==============================================================================
-# Alvo: 55 partidas por PESSOA (Gabinho = 55 em 1 conta / Guiza = ~23 em cada uma das 3)
-GLOBAL_TARGET = 55
+# Quantas partidas Flex de 2026 buscamos por PESSOA (Soma das contas)
+GLOBAL_TARGET_PER_PERSON = 55
 
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
@@ -36,41 +36,53 @@ SQUAD_LIST = [
     {"nick": "Sugiro Correr", "tag": "BR1"}
 ]
 
+# Mapa de Unificação (Soma as smurfs no jogador principal)
 NOME_DISPLAY = {
     "GUIZINHA": "GUIZA",
     "EZFALSE": "GUIZA",
     "GUIZA": "GUIZA"
 }
 
-# Conta contas para divisão de cota
-ACCOUNT_COUNTS = {}
-for p in SQUAD_LIST:
-    real_name = NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper())
-    ACCOUNT_COUNTS[real_name] = ACCOUNT_COUNTS.get(real_name, 0) + 1
-
 st.set_page_config(page_title="OFENSIVO SCORE", layout="wide", page_icon="⚔️")
 
 # ==============================================================================
-# 1. VISUAL
+# 1. VISUAL (CSS)
 # ==============================================================================
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; }
     h1, h2, h3 { font-family: 'Roboto', sans-serif; color: #ffffff; }
-    div[data-testid="metric-container"] { background-color: #1a1c24; border-left: 4px solid #c8aa6e; padding: 15px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
-    .medal-box { background: linear-gradient(145deg, #1e2328, #1a1c24); border: 1px solid #c8aa6e; padding: 15px; border-radius: 10px; text-align: center; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+    
+    /* KPI Cards */
+    div[data-testid="metric-container"] {
+        background-color: #1a1c24; border-left: 4px solid #c8aa6e;
+        padding: 15px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    }
+    
+    /* Medalhas */
+    .medal-box {
+        background: linear-gradient(145deg, #1e2328, #1a1c24); border: 1px solid #c8aa6e;
+        padding: 15px; border-radius: 10px; text-align: center;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.6); height: 100%;
+        display: flex; flex-direction: column; justify-content: center; align-items: center;
+    }
     .medal-icon { font-size: 3em; margin-bottom: 5px; }
     .medal-title { color: #d4af37; font-weight: bold; font-size: 1.1em; text-transform: uppercase; margin: 0; }
     .medal-player { color: #ff4b4b; font-weight: bold; font-size: 1.6em; margin: 5px 0; }
     .medal-desc { color: #a0a0a0; font-style: italic; font-size: 0.85em; }
+
     .title-text { font-size: 3.5em; font-weight: bold; color: #ff4b4b; text-align: center; text-shadow: 2px 2px #000; }
     .subtitle-text { font-size: 1.2em; font-style: italic; color: #a0a0a0; text-align: center; margin-bottom: 30px; }
+    .footer-group { font-size: 1.5em; color: #ffffff; text-align: left; margin-top: 50px; }
+    .footer-final { font-size: 4em; font-weight: bold; color: #d4af37; text-align: center; margin-top: 10px; font-family: 'Impact'; letter-spacing: 5px; }
+    
     .stButton>button { background-color: #1e2328; color: #cdbe91; border: 1px solid #463714; font-weight: bold; width: 100%; }
+    .stButton>button:hover { border-color: #c8aa6e; color: #f0e6d2; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. CORE LOGIC
+# 2. LÓGICA DE NEGÓCIO
 # ==============================================================================
 class MatchStats(BaseModel):
     MatchID: str; Data: str; Timestamp: float; Jogador: str; Tipo: str
@@ -120,9 +132,15 @@ class DatabaseAdapter:
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
             if df.empty: return pd.DataFrame()
+            
+            # Normalização de nomes (Guizinha -> GUIZA)
             df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(str(x).upper(), str(x).upper()))
+            
+            # Conversão segura de números
             num_cols = ['Score', 'K', 'D', 'A', 'Part', 'DPM', 'Dano_Estruturas', 'Pinks', 'Timestamp']
-            for c in num_cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+            for c in num_cols: 
+                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+            
             return df
         except: return pd.DataFrame()
 
@@ -130,9 +148,12 @@ class DatabaseAdapter:
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
             stats_id = str(stats.MatchID)
+            # Salva o nome original (ex: GUIZINHA) para manter rastreabilidade
+            # A normalização acontece na leitura
             stats_player = str(stats.Jogador).upper()
             df['MatchID'] = df['MatchID'].astype(str)
             
+            # Verifica se já existe para este jogador específico
             if not ((df['MatchID'] == stats_id) & (df['Jogador'] == stats_player)).any():
                 pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
                 return True
@@ -145,12 +166,12 @@ class DatabaseAdapter:
         return True
 
 # ==============================================================================
-# 4. API RIOT
+# 4. API RIOT (DINÂMICA)
 # ==============================================================================
 class RiotAdapter:
     def __init__(self, api_key):
         self.headers = {"X-Riot-Token": api_key}
-        self.season_start = 1735689600 # 01/01/2026 (Epoch Seconds)
+        self.season_start_ts = 1735689600000 # 01/01/2026 em MS
 
     def request_blindado(self, url):
         for i in range(3):
@@ -177,35 +198,48 @@ class RiotAdapter:
             return "Unranked"
         except: return "Unranked"
 
-    def fetch_flex_quota(self, nome, tag, quota_limit):
+    def fetch_flex_dynamic(self, nome, tag, limit_needed):
+        """
+        Baixa partidas Flex até 'limit_needed' ser satisfeito OU acabarem as partidas de 2026.
+        """
+        if limit_needed <= 0: return [], 0, 0, "Cota cheia"
+
         try:
-            # 1. Resolve PUUID
+            # 1. Resolve Conta
             n_enc, t_enc = quote(nome.strip()), quote(tag.replace('#','').strip())
             acc, status = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n_enc}/{t_enc}")
             
-            if status == 403: return [], 0, "⛔ Chave Vencida"
-            if status == 404: return [], 0, "❌ Conta não achada"
-            if status != 200: return [], 0, "⚠️ Erro API"
+            if status == 403: return [], 0, 0, "⛔ Chave Vencida"
+            if status == 404: return [], 0, 0, "❌ Conta não achada"
+            if status != 200: return [], 0, 0, "⚠️ Erro API"
             
             puuid = acc['puuid']
             rank_atual = self.fetch_rank(puuid)
 
-            # 2. Busca lista (QUEUE 440 = FLEX)
-            url_ids = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&start=0&count={quota_limit}"
+            # 2. Busca IDs (QUEUE 440 = FLEX)
+            # Pede um pouco a mais que o limite para cobrir eventuais partidas velhas que venham no lote
+            req_count = limit_needed + 20 
+            if req_count > 100: req_count = 100
+            
+            url_ids = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&start=0&count={req_count}"
             m_ids, m_status = self.request_blindado(url_ids)
             
-            if m_status != 200: return [], 0, "Erro lista"
-            if not m_ids: return [], 0, "Sem Flex Recente"
+            if m_status != 200: return [], 0, 0, "Erro lista"
+            if not m_ids: return [], 0, 0, "Sem histórico"
 
-            # 3. Baixa Detalhes (COM FILTRO RÍGIDO DE DATA)
+            # 3. Baixa Detalhes & Filtra 2026
             data = []
+            skipped_old = 0
+            
             for mid in m_ids:
+                if len(data) >= limit_needed: break # Já encheu o balde desta conta
+
                 d, d_status = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{mid}")
                 if d_status == 200 and d:
-                    # >>> TRAVA DE SEGURANÇA 2026 <<<
-                    # Riot gameCreation é ms, season_start é s. Multiplicamos start por 1000.
-                    if d['info']['gameCreation'] < (self.season_start * 1000):
-                        continue # Ignora partida velha
+                    # >>> FILTRO RÍGIDO DE ANO (2026) <<<
+                    if d['info']['gameCreation'] < self.season_start_ts:
+                        skipped_old += 1
+                        continue # Pula partida de 2025 ou antes
 
                     if d['info']['queueId'] == 440:
                         p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
@@ -228,9 +262,9 @@ class RiotAdapter:
                             ))
                 time.sleep(0.1)
             
-            return data, len(data), "OK"
+            return data, len(data), skipped_old, "OK"
 
-        except Exception as e: return [], 0, str(e)
+        except Exception as e: return [], 0, 0, str(e)
 
 # ==============================================================================
 # 5. RENDER UI
@@ -248,40 +282,53 @@ def render():
         acao = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
         
         if acao == "Sincronizar Squad (API)":
-            if st.button(f"🔄 Sincronizar (Meta: {GLOBAL_TARGET}/pessoa)"):
-                log = st.status("Iniciando varredura proporcional...", expanded=True)
-                total_added = 0
+            if st.button(f"🔄 Sincronizar (Meta: {GLOBAL_TARGET_PER_PERSON})"):
+                log = st.status("Iniciando varredura inteligente...", expanded=True)
+                total_added_global = 0
                 
+                # 1. Agrupar Jogadores (Guiza + Guizinha + Ezfalse = 1 Pessoa)
+                grouped_squad = {}
                 for p in SQUAD_LIST:
                     real_name = NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper())
-                    num_accs = ACCOUNT_COUNTS.get(real_name, 1)
+                    if real_name not in grouped_squad: grouped_squad[real_name] = []
+                    grouped_squad[real_name].append(p)
+                
+                # 2. Iterar por PESSOA (Balde de 55 partidas compartilhado)
+                for real_name, accounts in grouped_squad.items():
+                    matches_needed = GLOBAL_TARGET_PER_PERSON
+                    log.write(f"👤 **{real_name}**: Meta {matches_needed} jogos...")
                     
-                    # COTA POR CONTA: 55 totais / numero de contas + margem
-                    quota = int(GLOBAL_TARGET / num_accs) + 5
-                    
-                    log.write(f"🔎 **{p['nick']}**: Buscando até {quota} Flex (2026)...")
-                    matches, count, msg = riot.fetch_flex_quota(p['nick'], p['tag'], quota)
-                    
-                    if count > 0:
-                        saved = 0
-                        for m in matches:
-                            if db.save(m): saved += 1
-                        total_added += saved
-                        if saved > 0: log.write(f"✅ +{saved} novos!")
-                        else: log.write(f"💤 {count} checados (sem novidades).")
-                    elif "Erro" in msg or "Conta" in msg:
-                        log.error(f"❌ {msg}")
-                    else:
-                        log.write(f"⚠️ {msg}")
-                    
-                    time.sleep(0.2)
+                    for acc in accounts:
+                        # Se já encheu a cota da PESSOA, pula as outras contas
+                        if matches_needed <= 0:
+                            log.write(f"   ⏩ {acc['nick']}: Cota completa.")
+                            continue
+                        
+                        # Busca o que falta
+                        matches, count, skipped, msg = riot.fetch_flex_dynamic(acc['nick'], acc['tag'], matches_needed)
+                        
+                        if count > 0:
+                            saved = 0
+                            for m in matches:
+                                if db.save(m): saved += 1
+                            total_added_global += saved
+                            
+                            # O que achamos válido abate da meta
+                            matches_needed -= count
+                            log.write(f"   ✅ {acc['nick']}: +{saved} novos (Achou {count}, Ignorou {skipped} velhos)")
+                        elif "Erro" in msg or "Conta" in msg:
+                            log.error(f"   ❌ {acc['nick']}: {msg}")
+                        else:
+                            log.write(f"   💤 {acc['nick']}: Nada de 2026 ({skipped} velhos ignorados).")
+                        
+                        time.sleep(0.2)
                 
                 log.update(label="Fim!", state="complete", expanded=False)
-                if total_added > 0:
-                    st.success(f"Adicionadas {total_added} partidas.")
+                if total_added_global > 0:
+                    st.success(f"Sucesso! {total_added_global} partidas de 2026 adicionadas.")
                     time.sleep(2)
                     st.rerun()
-                else: st.info("Banco atualizado.")
+                else: st.info("Nenhuma partida nova de 2026 encontrada.")
 
         else:
             file = st.file_uploader("Upload Print", type=['png','jpg'])
@@ -303,11 +350,12 @@ def render():
                 db.reset_database()
                 st.rerun()
 
+    # LEITURA
     df = db.get_all()
     todos = sorted(list(set(NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper()) for p in SQUAD_LIST)))
     df_f = df[df['Tipo'] != 'Custom'] if not df.empty else pd.DataFrame()
 
-    # --- BALANCEAMENTO VISUAL ---
+    # BALANCEAMENTO VISUAL (Achatamento de Curva)
     df_ranking = df_f.copy()
     if not df_f.empty:
         counts = df_f['Jogador'].value_counts()
@@ -333,7 +381,7 @@ def render():
             
             k1.metric("🔥 MVP (Média)", mvp_name, f"{mvp_val:.1f}")
             k2.metric("💀 Dano (Médio)", f"{df_ranking.groupby('Jogador')['DPM'].mean().max():.0f}")
-            k3.metric("🎮 Banco Total", f"{len(df_f)} Jogos")
+            k3.metric("🎮 Jogos (2026)", f"{len(df_f)}")
             k4.metric("📈 Média Squad", f"{df_f['Score'].mean():.1f}")
             
             st.markdown("---")
@@ -343,18 +391,18 @@ def render():
                 for p in todos:
                     d = df_ranking[df_ranking['Jogador'] == p]
                     media = d['Score'].mean() if not d.empty else 0
-                    stats.append({'Jogador': p, 'Média': media, 'Jogos (Rank)': len(d)})
+                    stats.append({'Jogador': p, 'Média': media, 'Jogos': len(d)})
                 
                 lb = pd.DataFrame(stats).sort_values('Média', ascending=False)
                 lb['Rank'] = lb['Média'].apply(get_rank_bravura)
-                st.dataframe(lb[['Jogador', 'Rank', 'Média', 'Jogos (Rank)']].style.background_gradient(cmap='YlOrRd', subset=['Média']), use_container_width=True)
+                st.dataframe(lb[['Jogador', 'Rank', 'Média', 'Jogos']].style.background_gradient(cmap='YlOrRd', subset=['Média']), use_container_width=True)
             
             with c2:
                 df_hist = df_f.sort_values('Timestamp')
                 df_hist['Acumulado'] = df_hist.groupby('Jogador')['Score'].cumsum()
                 fig = px.area(df_hist, x='Data', y='Acumulado', color='Jogador', template='plotly_dark', title="Evolução Total")
                 st.plotly_chart(fig, use_container_width=True)
-        else: st.info("Sem dados. Clique em Atualizar.")
+        else: st.info("Sem dados de 2026. Clique em Sincronizar.")
 
     with t2:
         if not df_f.empty:
@@ -371,7 +419,7 @@ def render():
     with t3:
         if not df_ranking.empty:
             st.subheader(f"📊 Auditoria")
-            # CORREÇÃO DO ERRO ANTERIOR: CRIA COLUNAS ANTES DE AGRUPAR
+            # CRIA COLUNAS ANTES DE AGRUPAR
             df_a = df_ranking.copy()
             df_a['Pts_KP'] = df_a['Part'] * 40
             df_a['Pts_DPM'] = df_a['DPM'] / 100
