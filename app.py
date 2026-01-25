@@ -17,11 +17,7 @@ from typing import Optional
 # ==============================================================================
 # 0. CONFIGURAÇÕES
 # ==============================================================================
-# Tamanho do lote de busca na API (Sincronização)
-BATCH_SIZE = 20 
-
-# JANELA COMPETITIVA: O Ranking considera apenas as últimas X partidas de cada um
-RANKING_WINDOW = 15 
+BATCH_SIZE = 20  # Quantas partidas buscar na Riot por clique (Rápido)
 
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
@@ -48,28 +44,38 @@ NOME_DISPLAY = {
 st.set_page_config(page_title="OFENSIVO SCORE", layout="wide", page_icon="⚔️")
 
 # ==============================================================================
-# 1. ESTILO
+# 1. VISUAL
 # ==============================================================================
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; }
     h1, h2, h3 { font-family: 'Roboto', sans-serif; color: #ffffff; }
-    div[data-testid="metric-container"] { background-color: #1a1c24; border-left: 4px solid #c8aa6e; padding: 15px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
-    .medal-box { background: linear-gradient(145deg, #1e2328, #1a1c24); border: 1px solid #c8aa6e; padding: 15px; border-radius: 10px; text-align: center; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+    
+    div[data-testid="metric-container"] {
+        background-color: #1a1c24; border-left: 4px solid #c8aa6e;
+        padding: 15px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    }
+    
+    .medal-box {
+        background: linear-gradient(145deg, #1e2328, #1a1c24); border: 1px solid #c8aa6e;
+        padding: 15px; border-radius: 10px; text-align: center;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.6); height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center;
+    }
     .medal-icon { font-size: 3em; margin-bottom: 5px; }
     .medal-title { color: #d4af37; font-weight: bold; font-size: 1.1em; text-transform: uppercase; margin: 0; }
     .medal-player { color: #ff4b4b; font-weight: bold; font-size: 1.6em; margin: 5px 0; }
     .medal-desc { color: #a0a0a0; font-style: italic; font-size: 0.85em; }
+
     .title-text { font-size: 3.5em; font-weight: bold; color: #ff4b4b; text-align: center; text-shadow: 2px 2px #000; }
     .subtitle-text { font-size: 1.2em; font-style: italic; color: #a0a0a0; text-align: center; margin-bottom: 30px; }
-    .footer-group { font-size: 1.5em; color: #ffffff; text-align: left; margin-top: 50px; }
-    .footer-final { font-size: 4em; font-weight: bold; color: #d4af37; text-align: center; margin-top: 10px; font-family: 'Impact'; letter-spacing: 5px; }
+    
     .stButton>button { background-color: #1e2328; color: #cdbe91; border: 1px solid #463714; font-weight: bold; width: 100%; }
+    .stButton>button:hover { border-color: #c8aa6e; color: #f0e6d2; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. MOTORES
+# 2. LÓGICA DO SCORE
 # ==============================================================================
 class MatchStats(BaseModel):
     MatchID: str; Data: str; Timestamp: float; Jogador: str; Tipo: str
@@ -136,6 +142,7 @@ class DatabaseAdapter:
             stats_player = str(stats.Jogador).upper()
             df['MatchID'] = df['MatchID'].astype(str)
             df['Jogador'] = df['Jogador'].astype(str).str.upper()
+            
             exists = ((df['MatchID'] == stats_id) & (df['Jogador'] == stats_player)).any()
             if not exists:
                 pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
@@ -149,7 +156,7 @@ class DatabaseAdapter:
         return True
 
 # ==============================================================================
-# 4. API RIOT
+# 4. API RIOT (LÓGICA CORRIGIDA DE ELO)
 # ==============================================================================
 class RiotAdapter:
     def __init__(self, api_key):
@@ -169,30 +176,51 @@ class RiotAdapter:
         return None
 
     def fetch_rank(self, puuid):
+        # FLUXO CORRETO DO GITHUB/DEV PORTAL:
+        # 1. Pega SummonerID (BR1) usando PUUID
+        # 2. Pega Liga (BR1) usando SummonerID
+        # 3. Filtra RANKED_FLEX_SR
         try:
-            summ = self.request_blindado(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}")
+            # Passo 1: Summoner V4
+            summ_url = f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}"
+            summ = self.request_blindado(summ_url)
+            
             if not summ: return "Unranked"
-            leagues = self.request_blindado(f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{summ['id']}")
+            
+            summ_id = summ['id']
+            
+            # Passo 2: League V4
+            league_url = f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{summ_id}"
+            leagues = self.request_blindado(league_url)
+            
             if leagues:
+                # Procura Flex
                 flex = next((l for l in leagues if l['queueType'] == "RANKED_FLEX_SR"), None)
-                if flex: return f"{flex['tier']} {flex['rank']}"
+                if flex:
+                    return f"{flex['tier']} {flex['rank']}"
+            
             return "Unranked"
-        except: return "Unranked"
+        except Exception as e:
+            print(f"Erro Rank: {e}")
+            return "Unranked"
 
     def fetch_recent_flex(self, nome, tag):
         try:
+            # 1. Resolve PUUID (Americas)
             n, t = quote(nome.strip()), quote(tag.replace('#','').strip())
             acc = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n}/{t}")
             if not acc: return None, 0, "Conta não achada"
             puuid = acc['puuid']
             
+            # 2. Busca Elo Agora (BR1)
             rank_atual = self.fetch_rank(puuid)
-            
-            # Baixa as 20 ultimas Flex recentes
+
+            # 3. Busca Partidas (Americas)
+            # queue=440 (Flex) direto na URL para poupar requisições
             url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={self.season_start}&start=0&count={BATCH_SIZE}"
             m_ids = self.request_blindado(url)
             
-            if not m_ids: return [], 0, "Sem Flex Recente"
+            if not m_ids: return [], 0, "Sem Flex 2026"
             
             data = []
             for m_id in m_ids:
@@ -221,7 +249,7 @@ class RiotAdapter:
         except Exception as e: return None, 0, str(e)
 
 # ==============================================================================
-# 5. RENDER
+# 5. RENDERIZAÇÃO
 # ==============================================================================
 def render():
     db = DatabaseAdapter()
@@ -236,8 +264,8 @@ def render():
         acao = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
         
         if acao == "Sincronizar Squad (API)":
-            if st.button(f"🔄 Sincronizar (Recentes)"):
-                log = st.status("Verificando partidas recentes...", expanded=True)
+            if st.button(f"🔄 Sincronizar (Últimas {BATCH_SIZE})"):
+                log = st.status(f"Verificando {BATCH_SIZE} partidas recentes...", expanded=True)
                 total_novos = 0
                 for p in SQUAD_LIST:
                     log.write(f"🔎 **{p['nick']}**...")
@@ -247,7 +275,7 @@ def render():
                         for m in matches:
                             if db.save(m): saved += 1
                         total_novos += saved
-                        if saved > 0: log.write(f"✅ +{saved} novas!")
+                        if saved > 0: log.write(f"✅ +{saved} novas (de {count} encontradas)!")
                     else: log.error(f"❌ Erro: {msg}")
                     time.sleep(0.2)
                 log.update(label="Fim!", state="complete", expanded=False)
@@ -281,35 +309,28 @@ def render():
     todos = sorted(list(set(NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper()) for p in SQUAD_LIST)))
     df_f = df[df['Tipo'] != 'Custom'] if not df.empty else pd.DataFrame()
 
-    # --- LÓGICA DE JANELA COMPETITIVA (Últimas X Partidas) ---
-    # Aqui criamos um DataFrame FILTRADO apenas para o Ranking e Transparência
-    df_ranking = pd.DataFrame()
-    if not df_f.empty:
-        # Ordena por Data (mais recente primeiro) e pega as top N por Jogador
-        df_ranking = df_f.sort_values('Timestamp', ascending=False).groupby('Jogador').head(RANKING_WINDOW)
-
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🏆 RANKING", "🎖️ MEDALHAS", "📊 TRANSPARÊNCIA", "⚖️ ELOS", "⚓ AFUNDAMENTO", "🚪 QUEM SAI?", "👹 CUSTOMS"])
 
     with t1:
-        if not df_ranking.empty:
+        if not df_f.empty:
             k1, k2, k3, k4 = st.columns(4)
-            mvp_name = df_ranking.groupby('Jogador')['Score'].mean().idxmax()
-            k1.metric("🔥 MVP (Média)", mvp_name, f"{df_ranking.groupby('Jogador')['Score'].mean().max():.1f}")
-            k2.metric("💀 Dano (Médio)", f"{df_ranking.groupby('Jogador')['DPM'].mean().max():.0f}")
+            mvp_name = df_f.groupby('Jogador')['Score'].mean().idxmax()
+            mvp_val = df_f.groupby('Jogador')['Score'].mean().max()
+            k1.metric("🔥 MVP (Média)", mvp_name, f"{mvp_val:.1f}")
+            k2.metric("💀 Dano (Médio)", f"{df_f.groupby('Jogador')['DPM'].mean().max():.0f}")
             k3.metric("🎮 Jogos", f"{len(df_f)} Totais")
-            k4.metric("⚖️ Janela", f"Últimas {RANKING_WINDOW}")
+            k4.metric("📈 Média Global", f"{df_f['Score'].mean():.1f}")
             st.markdown("---")
             c1, c2 = st.columns([1.5, 2])
             with c1:
                 stats = []
                 for p in todos:
-                    d = df_ranking[df_ranking['Jogador'] == p]
-                    stats.append({'Jogador': p, 'Média': d['Score'].mean() if not d.empty else 0, 'Jogos (Janela)': len(d)})
+                    d = df_f[df_f['Jogador'] == p]
+                    stats.append({'Jogador': p, 'Média': d['Score'].mean() if not d.empty else 0, 'Jogos': len(d)})
                 lb = pd.DataFrame(stats).sort_values('Média', ascending=False)
                 lb['Rank'] = lb['Média'].apply(get_rank_bravura)
-                st.dataframe(lb[['Jogador', 'Rank', 'Média', 'Jogos (Janela)']].style.background_gradient(cmap='YlOrRd', subset=['Média']), use_container_width=True)
+                st.dataframe(lb[['Jogador', 'Rank', 'Média', 'Jogos']].style.background_gradient(cmap='YlOrRd', subset=['Média']), use_container_width=True)
             with c2:
-                # O Gráfico usa o histórico COMPLETO (df_f)
                 df_hist = df_f.sort_values('Timestamp')
                 df_hist['Acumulado'] = df_hist.groupby('Jogador')['Score'].cumsum()
                 fig = px.area(df_hist, x='Data', y='Acumulado', color='Jogador', template='plotly_dark')
@@ -317,7 +338,7 @@ def render():
         else: st.info("Sem dados.")
 
     with t2:
-        if not df_f.empty: # Medalhas usam histórico COMPLETO
+        if not df_f.empty:
             m1, m2, m3, m4 = st.columns(4)
             agg = df_f.groupby('Jogador').agg({'DPM': 'mean', 'Score': 'sum', 'D': 'sum', 'Part': 'mean', 'Vitoria': 'sum'})
             with m1: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🐢</div><div class='medal-title'>ARIEL</div><div class='medal-player'>{agg.sort_values(['Part', 'Vitoria']).index[0]}</div><span class='medal-desc'>Mais Safe (Menor KP)</span></div>", unsafe_allow_html=True)
@@ -326,9 +347,9 @@ def render():
             with m4: st.markdown(f"<div class='medal-box'><div class='medal-icon'>💀</div><div class='medal-title'>INIMIGO KDA</div><div class='medal-player'>{agg['D'].idxmax()}</div><span class='medal-desc'>Quem mais morreu</span></div>", unsafe_allow_html=True)
 
     with t3:
-        if not df_ranking.empty:
-            st.subheader(f"📊 Auditoria (Baseada nas últimas {RANKING_WINDOW} partidas)")
-            df_a = df_ranking.copy()
+        if not df_f.empty:
+            st.subheader(f"📊 Auditoria Completa")
+            df_a = df_f.copy()
             df_a['Pts_KP'] = df_a['Part'] * 40
             df_a['Pts_Dano'] = df_a['DPM'] / 100
             df_a['Pts_Torre'] = df_a['Dano_Estruturas'] / 500
@@ -340,10 +361,10 @@ def render():
     with t4:
         if not df_f.empty:
             elo = df_f.sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
-            media = df_ranking.groupby('Jogador')['Score'].mean() # Usa janela
-            comp = pd.DataFrame({'Riot': elo['RankRiot'], 'Score (Janela)': media})
-            comp['Rank Deidara'] = comp['Score (Janela)'].apply(get_rank_bravura)
-            st.dataframe(comp.sort_values('Score (Janela)', ascending=False), use_container_width=True)
+            media = df_f.groupby('Jogador')['Score'].mean()
+            comp = pd.DataFrame({'Riot': elo['RankRiot'], 'Score (Total)': media})
+            comp['Rank Deidara'] = comp['Score (Total)'].apply(get_rank_bravura)
+            st.dataframe(comp.sort_values('Score (Total)', ascending=False), use_container_width=True)
 
     with t5:
         if not df_f.empty:
