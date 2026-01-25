@@ -17,8 +17,9 @@ from typing import Optional
 # ==============================================================================
 # 0. CONFIGURAÇÕES
 # ==============================================================================
-# ALVO DE PARTIDAS TOTAIS POR PESSOA (Soma das contas)
-GLOBAL_TARGET_PER_PERSON = 50
+# Alvo de partidas por PESSOA REAL.
+# Se tiver 1 conta, busca 55. Se tiver 3, busca ~23 em cada (total ~70 com margem).
+GLOBAL_TARGET = 55
 
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
@@ -36,17 +37,23 @@ SQUAD_LIST = [
     {"nick": "Sugiro Correr", "tag": "BR1"}
 ]
 
-# Mapa de Unificação (Quem são as mesmas pessoas?)
+# Mapa de Unificação
 NOME_DISPLAY = {
     "GUIZINHA": "GUIZA",
     "EZFALSE": "GUIZA",
     "GUIZA": "GUIZA"
 }
 
+# Conta quantas contas cada pessoa tem para dividir a cota
+ACCOUNT_COUNTS = {}
+for p in SQUAD_LIST:
+    real_name = NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper())
+    ACCOUNT_COUNTS[real_name] = ACCOUNT_COUNTS.get(real_name, 0) + 1
+
 st.set_page_config(page_title="OFENSIVO SCORE", layout="wide", page_icon="⚔️")
 
 # ==============================================================================
-# 1. VISUAL
+# 1. VISUAL (CLÁSSICO)
 # ==============================================================================
 st.markdown("""
 <style>
@@ -127,11 +134,9 @@ class DatabaseAdapter:
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
             stats_id = str(stats.MatchID)
-            # Salva o nome original para permitir múltiplas contas na mesma pessoa
             stats_player = str(stats.Jogador).upper()
             df['MatchID'] = df['MatchID'].astype(str)
             
-            # Checa duplicidade
             if not ((df['MatchID'] == stats_id) & (df['Jogador'] == stats_player)).any():
                 pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
                 return True
@@ -144,7 +149,7 @@ class DatabaseAdapter:
         return True
 
 # ==============================================================================
-# 4. API RIOT (DEMOCRATIC SPLIT)
+# 4. API RIOT
 # ==============================================================================
 class RiotAdapter:
     def __init__(self, api_key):
@@ -177,9 +182,6 @@ class RiotAdapter:
         except: return "Unranked"
 
     def fetch_flex_quota(self, nome, tag, quota_limit):
-        """
-        Baixa partidas Flex até atingir a COTA específica dessa conta.
-        """
         try:
             # 1. PUUID
             n_enc, t_enc = quote(nome.strip()), quote(tag.replace('#','').strip())
@@ -192,8 +194,7 @@ class RiotAdapter:
             puuid = acc['puuid']
             rank_atual = self.fetch_rank(puuid)
 
-            # 2. LISTA DE PARTIDAS (QUEUE 440)
-            # Solicitamos a COTA exata para essa conta.
+            # 2. LISTA (Limitada pela cota)
             url_ids = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&start=0&count={quota_limit}"
             m_ids, m_status = self.request_blindado(url_ids)
             
@@ -223,72 +224,75 @@ class RiotAdapter:
                             Pinks=p['visionWardsBoughtInGame'], 
                             RankRiot=rank_atual
                         ))
-                time.sleep(0.1) # Delay
-            
+                time.sleep(0.1) 
             return data, len(data), "OK"
-
         except Exception as e: return [], 0, str(e)
 
 # ==============================================================================
 # 5. RENDER UI
 # ==============================================================================
 def render():
+    db = DatabaseAdapter()
+    riot = RiotAdapter(st.secrets.get("RIOT_KEY", ""))
+    gemini = genai.GenerativeModel('models/gemini-1.5-flash') if st.secrets.get("GEMINI_KEY") else None
+
     st.markdown("<div class='title-text'>⚔️ OFENSIVO SCORE ⚔️</div>", unsafe_allow_html=True)
     st.markdown("<div class='subtitle-text'>criado para jogadores ofensivos que gostam de rir e vencer</div>", unsafe_allow_html=True)
 
     with st.sidebar:
-        st.header("🎮 Configuração")
-        user_key = st.text_input("Cole sua Riot API Key:", type="password")
-        api_key = user_key if user_key else st.secrets.get("RIOT_KEY", "")
+        st.header("🎮 Painel deidara HO")
+        acao = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
         
-        db = DatabaseAdapter()
-        riot = RiotAdapter(api_key)
-        
-        st.markdown("---")
-        if st.button(f"🔄 Sincronizar (Alvo: {GLOBAL_TARGET_PER_PERSON}/pessoa)"):
-            if not api_key:
-                st.error("Precisa da Chave API!")
-            else:
-                log = st.status("Distribuindo cotas entre as contas...", expanded=True)
-                total_added_global = 0
+        if acao == "Sincronizar Squad (API)":
+            if st.button(f"🔄 Sincronizar (Meta: {GLOBAL_TARGET})"):
+                log = st.status("Iniciando varredura proporcional...", expanded=True)
+                total_added = 0
                 
-                # 1. Agrupar Jogadores
-                grouped_squad = {}
                 for p in SQUAD_LIST:
+                    # Lógica de Cota Proporcional (Divisão)
                     real_name = NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper())
-                    if real_name not in grouped_squad: grouped_squad[real_name] = []
-                    grouped_squad[real_name].append(p)
-                
-                # 2. Iterar por GRUPO
-                for real_name, accounts in grouped_squad.items():
-                    num_accs = len(accounts)
-                    # DIVISÃO DEMOCRÁTICA: 50 / 3 = 16.6 -> arredonda pra cima + margem de 5
-                    quota_per_acc = int(GLOBAL_TARGET_PER_PERSON / num_accs) + 5
+                    num_accs = ACCOUNT_COUNTS.get(real_name, 1)
                     
-                    log.write(f"👤 **{real_name}**: {num_accs} contas detectadas. Buscando ~{quota_per_acc} jogos de cada.")
+                    # Se tiver 1 conta, busca 55. Se tiver 3, busca 55/3 + 5 = ~23 em cada.
+                    quota = int(GLOBAL_TARGET / num_accs) + 5
                     
-                    for acc in accounts:
-                        matches, count, msg = riot.fetch_flex_quota(acc['nick'], acc['tag'], quota_per_acc)
-                        
-                        if count > 0:
-                            saved = 0
-                            for m in matches:
-                                if db.save(m): saved += 1
-                            total_added_global += saved
-                            log.write(f"   ✅ {acc['nick']}: +{saved} novos (Quota: {quota_per_acc})")
-                        elif "Erro" in msg:
-                            log.error(f"   ❌ {acc['nick']}: {msg}")
-                        else:
-                            log.write(f"   💤 {acc['nick']}: Sem dados recentes.")
-                        
-                        time.sleep(0.2)
+                    log.write(f"🔎 **{p['nick']}**: Buscando até {quota} Flex...")
+                    matches, count, msg = riot.fetch_flex_quota(p['nick'], p['tag'], quota)
+                    
+                    if count > 0:
+                        saved = 0
+                        for m in matches:
+                            if db.save(m): saved += 1
+                        total_added += saved
+                        if saved > 0: log.write(f"✅ +{saved} novos!")
+                        else: log.write(f"💤 Nada novo.")
+                    elif "Erro" in msg or "Conta" in msg:
+                        log.error(f"❌ {msg}")
+                    else:
+                        log.write(f"⚠️ {msg}")
+                    
+                    time.sleep(0.2)
                 
-                log.update(label="Sincronização Concluída!", state="complete", expanded=False)
-                if total_added_global > 0:
-                    st.success(f"+{total_added_global} partidas novas no total!")
+                log.update(label="Fim!", state="complete", expanded=False)
+                if total_added > 0:
+                    st.success(f"Adicionadas {total_added} partidas.")
                     time.sleep(2)
                     st.rerun()
-                else: st.info("Banco já está em dia.")
+                else: st.info("Banco atualizado.")
+
+        else:
+            file = st.file_uploader("Upload Print", type=['png','jpg'])
+            p_name = st.text_input("Nick").upper()
+            if st.button("🤖 Analisar") and file and gemini:
+                try:
+                    prompt = f"Extraia stats LoL JSON para {p_name}: {{'vitoria':bool,'k':int,'d':int,'a':int,'part':float,'dano_est':int,'dano_camp':int,'min':int,'pinks':int}}"
+                    raw = json.loads(gemini.generate_content([prompt, Image.open(file)]).text.replace('```json', '').replace('```', '').strip())
+                    sc = BravuraEngine.calculate_score(raw['vitoria'], raw['d'], raw['part'], raw['dano_est'], raw['dano_camp'], raw['min'], raw['pinks'])
+                    m = MatchStats(MatchID=f"c_{int(time.time())}", Data=datetime.now().strftime('%d/%m'), Timestamp=time.time()*1000, Jogador=p_name, Tipo='Custom', Vitoria=raw['vitoria'], Score=sc, K=raw['k'], D=raw['d'], A=raw['a'], Part=raw['part'], Dano_Estruturas=raw['dano_est'], DPM=round(raw['dano_camp']/raw['min'], 2), Pinks=raw['pinks'], RankRiot="Custom")
+                    db.save(m)
+                    st.success("Salvo!")
+                    st.rerun()
+                except: st.error("Erro no print.")
         
         st.markdown("---")
         with st.expander("Admin"):
@@ -296,12 +300,11 @@ def render():
                 db.reset_database()
                 st.rerun()
 
-    # LEITURA
     df = db.get_all()
     todos = sorted(list(set(NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper()) for p in SQUAD_LIST)))
     df_f = df[df['Tipo'] != 'Custom'] if not df.empty else pd.DataFrame()
 
-    # BALANCEAMENTO VISUAL (Achatar a Curva para o Ranking se necessário)
+    # --- BALANCEAMENTO VISUAL (Achatar a Curva para o Ranking se necessário) ---
     df_ranking = df_f.copy()
     if not df_f.empty:
         counts = df_f['Jogador'].value_counts()
@@ -346,9 +349,9 @@ def render():
             with c2:
                 df_hist = df_f.sort_values('Timestamp')
                 df_hist['Acumulado'] = df_hist.groupby('Jogador')['Score'].cumsum()
-                fig = px.area(df_hist, x='Data', y='Acumulado', color='Jogador', template='plotly_dark', title="Histórico Completo (Acumulado)")
+                fig = px.area(df_hist, x='Data', y='Acumulado', color='Jogador', template='plotly_dark', title="Evolução Total")
                 st.plotly_chart(fig, use_container_width=True)
-        else: st.info("Sem dados. Cole a chave API e Sincronize.")
+        else: st.info("Sem dados. Clique em Atualizar.")
 
     with t2:
         if not df_f.empty:
@@ -371,11 +374,7 @@ def render():
             df_a['Pts_Torre (/500)'] = df_a['Dano_Estruturas'] / 500
             df_a['Pts_Visao (x1)'] = df_a['Pinks']
             df_a['Penal_Medo (-25)'] = np.where((df_a['D'] <= 2) & (df_a['Part'] < 0.35), -25, 0)
-            
-            audit = df_a.groupby('Jogador').agg({
-                'Score': 'mean', 'Pts_KP (+40)': 'mean', 'Pts_DPM (/100)': 'mean', 
-                'Pts_Torre (/500)': 'mean', 'Pts_Visao (x1)': 'mean', 'Penal_Medo (-25)': 'mean'
-            }).round(2).sort_values('Score', ascending=False)
+            audit = df_a.groupby('Jogador').agg({'Score':'mean', 'Pts_KP':'mean', 'Pts_DPM':'mean', 'Pts_Torre':'mean', 'Pts_Visao':'mean', 'Penal_Medo':'mean'}).round(2).sort_values('Score', ascending=False)
             st.dataframe(audit, use_container_width=True)
 
     with t4:
