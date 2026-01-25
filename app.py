@@ -281,22 +281,44 @@ class RiotAdapter:
             except: return None
         return None
 
-    def fetch_rank(self, puuid):
+    def fetch_rank(self, puuid, debug_log=None):
+        """Busca rank de Flex do jogador. debug_log é uma função opcional para logging."""
         try:
             summ = self.request_blindado(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}")
-            if not summ: return "Unranked"
+            if not summ: 
+                if debug_log: debug_log("⚠️ Summoner não encontrado")
+                return "Unranked"
+            
+            if debug_log: debug_log(f"📋 Summoner ID: {summ.get('id', 'N/A')[:10]}...")
+            
             leagues = self.request_blindado(f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{summ['id']}")
+            
+            if debug_log: 
+                if leagues:
+                    filas = [l.get('queueType', 'N/A') for l in leagues]
+                    debug_log(f"📊 Filas encontradas: {filas}")
+                else:
+                    debug_log("⚠️ Nenhuma liga encontrada")
+            
             if leagues:
                 flex = next((l for l in leagues if l['queueType'] == "RANKED_FLEX_SR"), None)
-                if flex: return f"{flex['tier']} {flex['rank']}"
+                if flex: 
+                    rank = f"{flex['tier']} {flex['rank']}"
+                    if debug_log: debug_log(f"✅ Rank Flex: {rank}")
+                    return rank
+                else:
+                    if debug_log: debug_log("⚠️ Sem rank de FLEX (só Solo/Duo?)")
             return "Unranked"
-        except: return "Unranked"
+        except Exception as e: 
+            if debug_log: debug_log(f"❌ Erro: {str(e)}")
+            return "Unranked"
 
-    def fetch_recent_flex(self, nome, tag, existing_ids=None, cached_rank=None):
+    def fetch_recent_flex(self, nome, tag, existing_ids=None, cached_rank=None, debug_log=None):
         """
         Busca partidas recentes de Flex.
         - existing_ids: set de MatchIDs já salvos (para pular download)
         - cached_rank: rank já obtido (para evitar chamadas extras)
+        - debug_log: função para logging de debug
         """
         try:
             if existing_ids is None:
@@ -307,8 +329,8 @@ class RiotAdapter:
             if not acc: return None, 0, "Conta não achada"
             puuid = acc['puuid']
             
-            # Usa rank cacheado ou busca novo
-            rank_atual = cached_rank if cached_rank else self.fetch_rank(puuid)
+            # Usa rank cacheado ou busca novo (com debug)
+            rank_atual = cached_rank if cached_rank else self.fetch_rank(puuid, debug_log=debug_log)
             
             url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={1735689600}&start=0&count={BATCH_SIZE}"
             m_ids = self.request_blindado(url)
@@ -391,10 +413,11 @@ def render():
                 
                 for p in SQUAD_LIST:
                     log.write(f"🔎 **{p['nick']}**...")
-                    # Passa os IDs existentes para evitar download desnecessário
+                    # Passa os IDs existentes e a função de log para debug
                     matches, count, msg = riot.fetch_recent_flex(
                         p['nick'], p['tag'], 
-                        existing_ids=all_existing_ids
+                        existing_ids=all_existing_ids,
+                        debug_log=log.write  # Passa a função de log para debug
                     )
                     if matches is not None:
                         saved = 0
@@ -515,10 +538,27 @@ def render():
     todos = sorted(list(set(NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper()) for p in SQUAD_LIST)))
     df_f = df[df['Tipo'] != 'Custom'] if not df.empty else pd.DataFrame()
 
+    # --- SISTEMA DE NIVELAMENTO ---
+    nivel_modo = st.sidebar.radio(
+        "⚖️ Modo de Comparação:",
+        ["Nivelar por Cima", "Nivelar por Baixo"],
+        help="'Por Baixo': usa a menor quantidade de jogos do squad para todos. 'Por Cima': usa todos os jogos disponíveis."
+    )
+    
     df_ranking = pd.DataFrame()
+    min_games = 0
     if not df_f.empty:
-        # Janela de X partidas
-        df_ranking = df_f.sort_values('Timestamp', ascending=False).groupby('Jogador').head(RANKING_WINDOW)
+        # Calcular quantidade de jogos por jogador
+        games_per_player = df_f.groupby('Jogador').size()
+        min_games = games_per_player.min() if not games_per_player.empty else 0
+        
+        if nivel_modo == "Nivelar por Baixo" and min_games > 0:
+            # Usa apenas as últimas N partidas de cada jogador (N = mínimo do squad)
+            window = min(min_games, RANKING_WINDOW)
+            df_ranking = df_f.sort_values('Timestamp', ascending=False).groupby('Jogador').head(window)
+        else:
+            # Nivelar por Cima: usa janela padrão (comportamento original)
+            df_ranking = df_f.sort_values('Timestamp', ascending=False).groupby('Jogador').head(RANKING_WINDOW)
 
     # --- LÓGICA DE SCORE AGREGADO (MÉDIA DE COMPORTAMENTO) ---
     ranking_data = []
@@ -593,7 +633,11 @@ def render():
             x1_king = df_final.loc[df_final['Total_X1'].idxmax()]
             k3.metric("🎪 Circo (Rei X1)", x1_king['Jogador'], f"{int(x1_king['Total_X1'])} Kills")
             
-            k4.metric("⚖️ Janela Ranking", f"Últimas {RANKING_WINDOW}")
+            # Mostra info do modo de nivelamento
+            if nivel_modo == "Nivelar por Baixo":
+                k4.metric("⚖️ Nivelado", f"Mín {min_games} jogos", "Por Baixo")
+            else:
+                k4.metric("⚖️ Janela Ranking", f"Últimas {RANKING_WINDOW}", "Por Cima")
             
             st.markdown("---")
             c1, c2 = st.columns([1.5, 2])
@@ -818,7 +862,7 @@ def render():
                 # Converter para DataFrame
                 duo_data = []
                 for duo, stats in duo_stats.items():
-                    if stats['games'] >= 3:  # Mínimo 3 jogos juntos
+                    if stats['games'] >= 1:  # Reduzido de 3 para 1
                         winrate = (stats['wins'] / stats['games']) * 100
                         duo_data.append({
                             'Dupla': duo,
