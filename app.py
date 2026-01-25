@@ -15,8 +15,11 @@ from urllib.parse import quote
 from typing import Optional
 
 # ==============================================================================
-# 0. CONFIGURAÇÕES & SQUAD
+# 0. CONFIGURAÇÕES
 # ==============================================================================
+# ALVO DE PARTIDAS TOTAIS POR PESSOA (Soma das contas)
+GLOBAL_TARGET_PER_PERSON = 50
+
 SQUAD_LIST = [
     {"nick": "Gabinho", "tag": "INTEN"},
     {"nick": "Naguinha", "tag": "INTEN"},
@@ -33,7 +36,7 @@ SQUAD_LIST = [
     {"nick": "Sugiro Correr", "tag": "BR1"}
 ]
 
-# Mapa de Agrupamento
+# Mapa de Unificação (Quem são as mesmas pessoas?)
 NOME_DISPLAY = {
     "GUIZINHA": "GUIZA",
     "EZFALSE": "GUIZA",
@@ -112,28 +115,23 @@ class DatabaseAdapter:
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
             if df.empty: return pd.DataFrame()
-            # Normaliza nomes
+            # Mapeia nomes (Guizinha -> Guiza)
             df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(str(x).upper(), str(x).upper()))
-            # Converte números
+            # Garante números
             num_cols = ['Score', 'K', 'D', 'A', 'Part', 'DPM', 'Dano_Estruturas', 'Pinks', 'Timestamp']
             for c in num_cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
             return df
         except: return pd.DataFrame()
 
-    def get_existing_ids(self):
-        # Retorna set de IDs que já temos
-        df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
-        if df.empty: return set()
-        return set(df['MatchID'].tolist())
-
     def save(self, stats: MatchStats):
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
             stats_id = str(stats.MatchID)
+            # Salva o nome original para permitir múltiplas contas na mesma pessoa
             stats_player = str(stats.Jogador).upper()
             df['MatchID'] = df['MatchID'].astype(str)
             
-            # Verifica se já existe esse match para esse player (evita duplicação)
+            # Checa duplicidade
             if not ((df['MatchID'] == stats_id) & (df['Jogador'] == stats_player)).any():
                 pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
                 return True
@@ -146,93 +144,88 @@ class DatabaseAdapter:
         return True
 
 # ==============================================================================
-# 4. API RIOT (SYNC TOTAL 2026)
+# 4. API RIOT (DEMOCRATIC SPLIT)
 # ==============================================================================
 class RiotAdapter:
     def __init__(self, api_key):
         self.headers = {"X-Riot-Token": api_key}
-        self.season_start = 1735689600 # 01/01/2026
+        self.season_start = 1735689600 
 
     def request_blindado(self, url):
         for i in range(3):
             try:
                 resp = requests.get(url, headers=self.headers)
-                if resp.status_code == 200: return resp.json()
-                elif resp.status_code == 404: return None 
+                if resp.status_code == 200: return resp.json(), 200
+                elif resp.status_code == 403: return None, 403
+                elif resp.status_code == 404: return None, 404
                 elif resp.status_code == 429:
                     time.sleep(int(resp.headers.get("Retry-After", 5)) + 1)
                     continue
-            except: return None
-        return None
+                else: return None, resp.status_code
+            except: return None, 500
+        return None, 500
 
     def fetch_rank(self, puuid):
-        # Tenta pegar o Elo (BR1)
         try:
-            summ = self.request_blindado(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}")
-            if not summ: return "Unranked"
-            
-            leagues = self.request_blindado(f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{summ['id']}")
-            if leagues:
+            summ, s = self.request_blindado(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}")
+            if s != 200: return "Unranked"
+            leagues, l = self.request_blindado(f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{summ['id']}")
+            if l == 200 and leagues:
                 flex = next((l for l in leagues if l['queueType'] == "RANKED_FLEX_SR"), None)
                 if flex: return f"{flex['tier']} {flex['rank']}"
             return "Unranked"
         except: return "Unranked"
 
-    def sync_player_full_season(self, nome, tag, existing_ids_set):
+    def fetch_flex_quota(self, nome, tag, quota_limit):
         """
-        Baixa TODAS as Flex de 2026, compara com o banco e baixa só o delta.
+        Baixa partidas Flex até atingir a COTA específica dessa conta.
         """
         try:
-            # 1. Pega PUUID
+            # 1. PUUID
             n_enc, t_enc = quote(nome.strip()), quote(tag.replace('#','').strip())
-            acc = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n_enc}/{t_enc}")
-            if not acc: return [], 0, "Conta não encontrada"
-            puuid = acc['puuid']
+            acc, status = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n_enc}/{t_enc}")
             
-            # 2. Pega Rank Atual
+            if status == 403: return [], 0, "⛔ API Key Expirada"
+            if status == 404: return [], 0, "❌ Conta Errada"
+            if status != 200: return [], 0, f"⚠️ Erro {status}"
+            
+            puuid = acc['puuid']
             rank_atual = self.fetch_rank(puuid)
 
-            # 3. Pega Lista de TODAS as Flex de 2026 (Paginação se necessário, mas 100 deve cobrir Jan)
-            # queue=440 (Flex)
-            url_ids = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={self.season_start}&start=0&count=100"
-            server_ids = self.request_blindado(url_ids)
+            # 2. LISTA DE PARTIDAS (QUEUE 440)
+            # Solicitamos a COTA exata para essa conta.
+            url_ids = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&start=0&count={quota_limit}"
+            m_ids, m_status = self.request_blindado(url_ids)
             
-            if not server_ids: return [], 0, "Sem Flex em 2026"
+            if m_status != 200: return [], 0, f"Erro busca ({m_status})"
+            if not m_ids: return [], 0, "Sem histórico"
 
-            # 4. Calcula o Delta (O que eu não tenho?)
-            missing_ids = [mid for mid in server_ids if str(mid) not in existing_ids_set]
+            # 3. DETALHES
+            data = []
+            for mid in m_ids:
+                d, d_status = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{mid}")
+                if d_status == 200 and d:
+                    p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
+                    if p:
+                        mins = d['info']['gameDuration']/60
+                        sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
+                        data.append(MatchStats(
+                            MatchID=str(mid), 
+                            Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), 
+                            Timestamp=d['info']['gameCreation'], 
+                            Jogador=nome.upper(), 
+                            Tipo='Flex', 
+                            Vitoria=p['win'], 
+                            Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], 
+                            Part=p['challenges'].get('killParticipation', 0), 
+                            Dano_Estruturas=p['damageDealtToBuildings'], 
+                            DPM=round(p['totalDamageDealtToChampions']/mins, 2), 
+                            Pinks=p['visionWardsBoughtInGame'], 
+                            RankRiot=rank_atual
+                        ))
+                time.sleep(0.1) # Delay
             
-            if not missing_ids: return [], 0, "Já atualizado"
-
-            # 5. Baixa Detalhes dos Faltantes
-            new_data = []
-            for mid in missing_ids:
-                d = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{mid}")
-                if d:
-                    # Verifica de novo se é Flex (segurança)
-                    if d['info']['queueId'] == 440:
-                        p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
-                        if p:
-                            mins = d['info']['gameDuration']/60
-                            sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
-                            
-                            new_data.append(MatchStats(
-                                MatchID=str(mid), 
-                                Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), 
-                                Timestamp=d['info']['gameCreation'], 
-                                Jogador=nome.upper(), 
-                                Tipo='Flex', 
-                                Vitoria=p['win'], 
-                                Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], 
-                                Part=p['challenges'].get('killParticipation', 0), 
-                                Dano_Estruturas=p['damageDealtToBuildings'], 
-                                DPM=round(p['totalDamageDealtToChampions']/mins, 2), 
-                                Pinks=p['visionWardsBoughtInGame'], 
-                                RankRiot=rank_atual
-                            ))
-                time.sleep(0.1) 
-            
-            return new_data, len(new_data), "OK"
+            return data, len(data), "OK"
 
         except Exception as e: return [], 0, str(e)
 
@@ -240,99 +233,89 @@ class RiotAdapter:
 # 5. RENDER UI
 # ==============================================================================
 def render():
-    db = DatabaseAdapter()
-    riot = RiotAdapter(st.secrets.get("RIOT_KEY", ""))
-    gemini = genai.GenerativeModel('models/gemini-1.5-flash') if st.secrets.get("GEMINI_KEY") else None
-
     st.markdown("<div class='title-text'>⚔️ OFENSIVO SCORE ⚔️</div>", unsafe_allow_html=True)
     st.markdown("<div class='subtitle-text'>criado para jogadores ofensivos que gostam de rir e vencer</div>", unsafe_allow_html=True)
 
     with st.sidebar:
-        st.header("🎮 Painel deidara HO")
-        acao = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
+        st.header("🎮 Configuração")
+        user_key = st.text_input("Cole sua Riot API Key:", type="password")
+        api_key = user_key if user_key else st.secrets.get("RIOT_KEY", "")
         
-        if acao == "Sincronizar Squad (API)":
-            if st.button("🔄 Sincronizar Tudo (2026)"):
-                log = st.status("Verificando histórico completo...", expanded=True)
-                total_added = 0
-                
-                # Carrega o cache de IDs existentes para não baixar repetido
-                existing_ids = db.get_existing_ids()
-
-                for p in SQUAD_LIST:
-                    log.write(f"🔎 **{p['nick']}**: Analisando...")
-                    
-                    new_matches, count, msg = riot.sync_player_full_season(p['nick'], p['tag'], existing_ids)
-                    
-                    if count > 0:
-                        saved = 0
-                        for m in new_matches:
-                            if db.save(m): 
-                                saved += 1
-                                existing_ids.add(m.MatchID) # Atualiza cache local
-                        total_added += saved
-                        log.write(f"✅ {p['nick']}: +{saved} jogos novos!")
-                    elif msg == "Já atualizado":
-                        log.write(f"💤 {p['nick']}: Tudo em dia.")
-                    else:
-                        log.error(f"❌ {p['nick']}: {msg}")
-                    
-                    time.sleep(0.2)
-                
-                log.update(label="Fim!", state="complete", expanded=False)
-                if total_added > 0:
-                    st.success(f"+{total_added} novas partidas no histórico!")
-                    time.sleep(2)
-                    st.rerun()
-                else: st.info("Nenhuma partida nova encontrada.")
-
-        else:
-            file = st.file_uploader("Upload Print", type=['png','jpg'])
-            p_name = st.text_input("Nick").upper()
-            if st.button("🤖 Analisar") and file and gemini:
-                try:
-                    prompt = f"Extraia stats LoL JSON para {p_name}: {{'vitoria':bool,'k':int,'d':int,'a':int,'part':float,'dano_est':int,'dano_camp':int,'min':int,'pinks':int}}"
-                    raw = json.loads(gemini.generate_content([prompt, Image.open(file)]).text.replace('```json', '').replace('```', '').strip())
-                    sc = BravuraEngine.calculate_score(raw['vitoria'], raw['d'], raw['part'], raw['dano_est'], raw['dano_camp'], raw['min'], raw['pinks'])
-                    m = MatchStats(MatchID=f"c_{int(time.time())}", Data=datetime.now().strftime('%d/%m'), Timestamp=time.time()*1000, Jogador=p_name, Tipo='Custom', Vitoria=raw['vitoria'], Score=sc, K=raw['k'], D=raw['d'], A=raw['a'], Part=raw['part'], Dano_Estruturas=raw['dano_est'], DPM=round(raw['dano_camp']/raw['min'], 2), Pinks=raw['pinks'], RankRiot="Custom")
-                    db.save(m)
-                    st.success("Salvo!")
-                    st.rerun()
-                except: st.error("Erro no print.")
+        db = DatabaseAdapter()
+        riot = RiotAdapter(api_key)
         
         st.markdown("---")
-        with st.expander("🛠️ Admin"):
+        if st.button(f"🔄 Sincronizar (Alvo: {GLOBAL_TARGET_PER_PERSON}/pessoa)"):
+            if not api_key:
+                st.error("Precisa da Chave API!")
+            else:
+                log = st.status("Distribuindo cotas entre as contas...", expanded=True)
+                total_added_global = 0
+                
+                # 1. Agrupar Jogadores
+                grouped_squad = {}
+                for p in SQUAD_LIST:
+                    real_name = NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper())
+                    if real_name not in grouped_squad: grouped_squad[real_name] = []
+                    grouped_squad[real_name].append(p)
+                
+                # 2. Iterar por GRUPO
+                for real_name, accounts in grouped_squad.items():
+                    num_accs = len(accounts)
+                    # DIVISÃO DEMOCRÁTICA: 50 / 3 = 16.6 -> arredonda pra cima + margem de 5
+                    quota_per_acc = int(GLOBAL_TARGET_PER_PERSON / num_accs) + 5
+                    
+                    log.write(f"👤 **{real_name}**: {num_accs} contas detectadas. Buscando ~{quota_per_acc} jogos de cada.")
+                    
+                    for acc in accounts:
+                        matches, count, msg = riot.fetch_flex_quota(acc['nick'], acc['tag'], quota_per_acc)
+                        
+                        if count > 0:
+                            saved = 0
+                            for m in matches:
+                                if db.save(m): saved += 1
+                            total_added_global += saved
+                            log.write(f"   ✅ {acc['nick']}: +{saved} novos (Quota: {quota_per_acc})")
+                        elif "Erro" in msg:
+                            log.error(f"   ❌ {acc['nick']}: {msg}")
+                        else:
+                            log.write(f"   💤 {acc['nick']}: Sem dados recentes.")
+                        
+                        time.sleep(0.2)
+                
+                log.update(label="Sincronização Concluída!", state="complete", expanded=False)
+                if total_added_global > 0:
+                    st.success(f"+{total_added_global} partidas novas no total!")
+                    time.sleep(2)
+                    st.rerun()
+                else: st.info("Banco já está em dia.")
+        
+        st.markdown("---")
+        with st.expander("Admin"):
             if st.button("Resetar Tudo"):
                 db.reset_database()
                 st.rerun()
 
+    # LEITURA
     df = db.get_all()
     todos = sorted(list(set(NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper()) for p in SQUAD_LIST)))
     df_f = df[df['Tipo'] != 'Custom'] if not df.empty else pd.DataFrame()
 
-    # --- LÓGICA DE BALANCEAMENTO NATURAL (Achatar a Curva) ---
+    # BALANCEAMENTO VISUAL (Achatar a Curva para o Ranking se necessário)
     df_ranking = df_f.copy()
     if not df_f.empty:
-        # 1. Conta quantos jogos cada um tem
         counts = df_f['Jogador'].value_counts()
         if not counts.empty:
-            median_games = counts.median() # Ex: 30 jogos
-            limit_threshold = median_games * 3 # Ex: 90 jogos (Discrepância Absurda)
+            median = counts.median()
+            limit = median * 3 
+            if limit < 15: limit = 15
             
-            # Se alguém passar do triplo da mediana, cortamos
-            players_to_cap = counts[counts > limit_threshold].index.tolist()
-            
-            if players_to_cap:
-                frames = []
-                for p in df_f['Jogador'].unique():
-                    p_data = df_f[df_f['Jogador'] == p].sort_values('Timestamp', ascending=False)
-                    if p in players_to_cap:
-                        # Pega só os ultimos N jogos (limit_threshold)
-                        frames.append(p_data.head(int(limit_threshold)))
-                    else:
-                        # Pega tudo
-                        frames.append(p_data)
-                df_ranking = pd.concat(frames)
+            frames = []
+            for p in df_f['Jogador'].unique():
+                p_data = df_f[df_f['Jogador'] == p].sort_values('Timestamp', ascending=False)
+                if len(p_data) > limit: frames.append(p_data.head(int(limit)))
+                else: frames.append(p_data)
+            df_ranking = pd.concat(frames) if frames else pd.DataFrame()
 
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🏆 RANKING", "🎖️ MEDALHAS", "📊 TRANSPARÊNCIA", "⚖️ ELOS", "⚓ AFUNDAMENTO", "🚪 QUEM SAI?", "👹 CUSTOMS"])
 
@@ -344,8 +327,8 @@ def render():
             
             k1.metric("🔥 MVP (Média)", mvp_name, f"{mvp_val:.1f}")
             k2.metric("💀 Dano (Médio)", f"{df_ranking.groupby('Jogador')['DPM'].mean().max():.0f}")
-            k3.metric("🎮 Histórico Total", f"{len(df_f)} Jogos")
-            k4.metric("📈 Média Global", f"{df_f['Score'].mean():.1f}")
+            k3.metric("🎮 Banco Total", f"{len(df_f)} Jogos")
+            k4.metric("📈 Média Squad", f"{df_f['Score'].mean():.1f}")
             
             st.markdown("---")
             c1, c2 = st.columns([1.5, 2])
@@ -354,35 +337,34 @@ def render():
                 for p in todos:
                     d = df_ranking[df_ranking['Jogador'] == p]
                     media = d['Score'].mean() if not d.empty else 0
-                    stats.append({'Jogador': p, 'Média': media, 'Jogos': len(d)})
+                    stats.append({'Jogador': p, 'Média': media, 'Jogos (Rank)': len(d)})
                 
                 lb = pd.DataFrame(stats).sort_values('Média', ascending=False)
                 lb['Rank'] = lb['Média'].apply(get_rank_bravura)
-                st.dataframe(lb[['Jogador', 'Rank', 'Média', 'Jogos']].style.background_gradient(cmap='YlOrRd', subset=['Média']), use_container_width=True)
+                st.dataframe(lb[['Jogador', 'Rank', 'Média', 'Jogos (Rank)']].style.background_gradient(cmap='YlOrRd', subset=['Média']), use_container_width=True)
             
             with c2:
-                # O Gráfico mostra a evolução TOTAL (Histórico Completo)
                 df_hist = df_f.sort_values('Timestamp')
                 df_hist['Acumulado'] = df_hist.groupby('Jogador')['Score'].cumsum()
-                fig = px.area(df_hist, x='Data', y='Acumulado', color='Jogador', template='plotly_dark', title="Evolução Total")
+                fig = px.area(df_hist, x='Data', y='Acumulado', color='Jogador', template='plotly_dark', title="Histórico Completo (Acumulado)")
                 st.plotly_chart(fig, use_container_width=True)
-        else: st.info("Sem dados. Clique em Sincronizar.")
+        else: st.info("Sem dados. Cole a chave API e Sincronize.")
 
     with t2:
-        if not df_f.empty: # Medalhas consideram histórico total
+        if not df_f.empty:
             m1, m2, m3, m4 = st.columns(4)
             agg = df_f.groupby('Jogador').agg({'DPM': 'mean', 'Score': 'sum', 'D': 'sum', 'Part': 'mean', 'Vitoria': 'sum'})
             if not agg.empty:
                 try:
-                    with m1: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🐢</div><div class='medal-title'>ARIEL</div><div class='medal-player'>{agg.sort_values(['Part', 'Vitoria']).index[0]}</div><span class='medal-desc'>Mais Safe (Menor KP)</span></div>", unsafe_allow_html=True)
-                    with m2: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🧨</div><div class='medal-title'>DANUDO</div><div class='medal-player'>{agg['DPM'].idxmax()}</div><span class='medal-desc'>Maior Dano Médio</span></div>", unsafe_allow_html=True)
-                    with m3: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🔪</div><div class='medal-title'>DINIZ</div><div class='medal-player'>{agg['Score'].idxmax()}</div><span class='medal-desc'>Maior Soma de Pontos</span></div>", unsafe_allow_html=True)
-                    with m4: st.markdown(f"<div class='medal-box'><div class='medal-icon'>💀</div><div class='medal-title'>INIMIGO KDA</div><div class='medal-player'>{agg['D'].idxmax()}</div><span class='medal-desc'>Quem mais morreu</span></div>", unsafe_allow_html=True)
+                    with m1: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🐢</div><div class='medal-title'>ARIEL</div><div class='medal-player'>{agg.sort_values(['Part', 'Vitoria']).index[0]}</div><span class='medal-desc'>Mais Safe</span></div>", unsafe_allow_html=True)
+                    with m2: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🧨</div><div class='medal-title'>DANUDO</div><div class='medal-player'>{agg['DPM'].idxmax()}</div><span class='medal-desc'>Maior Dano</span></div>", unsafe_allow_html=True)
+                    with m3: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🔪</div><div class='medal-title'>DINIZ</div><div class='medal-player'>{agg['Score'].idxmax()}</div><span class='medal-desc'>Maior Soma</span></div>", unsafe_allow_html=True)
+                    with m4: st.markdown(f"<div class='medal-box'><div class='medal-icon'>💀</div><div class='medal-title'>INIMIGO KDA</div><div class='medal-player'>{agg['D'].idxmax()}</div><span class='medal-desc'>Feeder</span></div>", unsafe_allow_html=True)
                 except: pass
 
     with t3:
         if not df_ranking.empty:
-            st.subheader(f"📊 Auditoria (Com Balanceamento)")
+            st.subheader(f"📊 Auditoria")
             df_a = df_ranking.copy()
             df_a['Pts_KP (+40)'] = df_a['Part'] * 40
             df_a['Pts_DPM (/100)'] = df_a['DPM'] / 100
@@ -398,11 +380,9 @@ def render():
 
     with t4:
         if not df_f.empty:
-            # Pega o rank mais recente não-Unranked
             elo = df_f[df_f['RankRiot'] != 'Unranked'].sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
             elo_all = df_f.sort_values('Timestamp').groupby('Jogador').tail(1)[['Jogador', 'RankRiot']].set_index('Jogador')
             elo_all.update(elo)
-            
             media = df_ranking.groupby('Jogador')['Score'].mean() 
             comp = pd.DataFrame({'Riot Flex': elo_all['RankRiot'], 'Score Médio': media})
             comp['Rank Deidara'] = comp['Score Médio'].apply(get_rank_bravura)
