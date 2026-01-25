@@ -250,6 +250,16 @@ class DatabaseAdapter:
         if os.path.exists(self.FILE_DB): os.remove(self.FILE_DB)
         pd.DataFrame(columns=MatchStats.model_fields.keys()).to_csv(self.FILE_DB, index=False)
         return True
+    
+    def get_existing_match_ids(self, jogador=None):
+        """Retorna set de MatchIDs já salvos (opcionalmente filtrado por jogador)"""
+        try:
+            df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
+            if df.empty: return set()
+            if jogador:
+                df = df[df['Jogador'].str.upper() == jogador.upper()]
+            return set(df['MatchID'].astype(str).tolist())
+        except: return set()
 
 # ==============================================================================
 # 4. API RIOT
@@ -282,21 +292,37 @@ class RiotAdapter:
             return "Unranked"
         except: return "Unranked"
 
-    def fetch_recent_flex(self, nome, tag):
+    def fetch_recent_flex(self, nome, tag, existing_ids=None, cached_rank=None):
+        """
+        Busca partidas recentes de Flex.
+        - existing_ids: set de MatchIDs já salvos (para pular download)
+        - cached_rank: rank já obtido (para evitar chamadas extras)
+        """
         try:
+            if existing_ids is None:
+                existing_ids = set()
+            
             n, t = quote(nome.strip()), quote(tag.replace('#','').strip())
             acc = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n}/{t}")
             if not acc: return None, 0, "Conta não achada"
             puuid = acc['puuid']
-            rank_atual = self.fetch_rank(puuid)
+            
+            # Usa rank cacheado ou busca novo
+            rank_atual = cached_rank if cached_rank else self.fetch_rank(puuid)
             
             url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={1735689600}&start=0&count={BATCH_SIZE}"
             m_ids = self.request_blindado(url)
             
             if not m_ids: return [], 0, "Sem Flex Recente"
             
+            # Filtra IDs que já existem no banco (OTIMIZAÇÃO PRINCIPAL)
+            new_ids = [m_id for m_id in m_ids if str(m_id) not in existing_ids]
+            
+            if not new_ids:
+                return [], 0, "Tudo sincronizado"
+            
             data = []
-            for m_id in m_ids:
+            for m_id in new_ids:
                 d = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}")
                 if d:
                     if d['info']['gameCreation'] < self.season_start: continue
@@ -304,6 +330,7 @@ class RiotAdapter:
                     p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
                     if p:
                         mins = d['info']['gameDuration']/60
+                        if mins < 1: mins = 1  # Evita divisão por zero
                         
                         # Extração Segura das Novas Métricas
                         challenges = p.get('challenges', {})
@@ -334,7 +361,7 @@ class RiotAdapter:
                             Champion=p.get('championName', 'Unknown'),
                             RankRiot=rank_atual
                         ))
-                time.sleep(0.1)
+                # Removido time.sleep(0.1) - API já tem rate limit
             return data, len(data), "OK"
         except Exception as e: return None, 0, str(e)
 
@@ -357,17 +384,28 @@ def render():
             if st.button(f"🔄 Sincronizar (Últimas {BATCH_SIZE})"):
                 log = st.status("Verificando partidas recentes...", expanded=True)
                 total_added = 0
+                
+                # OTIMIZAÇÃO: Pega todos os IDs existentes UMA VEZ
+                all_existing_ids = db.get_existing_match_ids()
+                log.write(f"📊 {len(all_existing_ids)} partidas já registradas")
+                
                 for p in SQUAD_LIST:
                     log.write(f"🔎 **{p['nick']}**...")
-                    matches, count, msg = riot.fetch_recent_flex(p['nick'], p['tag'])
+                    # Passa os IDs existentes para evitar download desnecessário
+                    matches, count, msg = riot.fetch_recent_flex(
+                        p['nick'], p['tag'], 
+                        existing_ids=all_existing_ids
+                    )
                     if matches is not None:
                         saved = 0
                         for m in matches:
-                            if db.save(m): saved += 1
+                            if db.save(m): 
+                                saved += 1
+                                all_existing_ids.add(m.MatchID)  # Atualiza cache local
                         total_added += saved
                         if saved > 0: log.write(f"✅ +{saved} novas!")
                     else: log.error(f"❌ Erro: {msg}")
-                    time.sleep(0.2)
+                    # Removido time.sleep(0.2) - desnecessário com rate limiting
                 log.update(label="Fim!", state="complete", expanded=False)
                 if total_added > 0:
                     st.success(f"{total_added} partidas adicionadas!")
