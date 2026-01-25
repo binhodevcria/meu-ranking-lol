@@ -105,7 +105,7 @@ class MatchStats(BaseModel):
 class BravuraEngine:
     @staticmethod
     def calculate_performance_score(vitoria, part, dano_est, dano_camp, minutos, pinks, solo_kills, plates, multi_score):
-        """Calcula APENAS a performance positiva (sem penalidades)"""
+        """Calcula APENAS a performance positiva (sem penalidades) para o histórico"""
         if minutos < 10: return 0.0
         
         # 1. Base
@@ -118,7 +118,7 @@ class BravuraEngine:
         score += (dano_est / 500)  # Objetivos
         score += (pinks * 2.0)     # Visão (X2)
         
-        # 3. Agressividade Extra
+        # 3. Agressividade Extra (Novas Features)
         score += (solo_kills * 2.0) # X1
         score += (plates * 1.0)     # Placas
         score += multi_score        # Multikills
@@ -127,32 +127,37 @@ class BravuraEngine:
 
 def get_rank_bravura(media):
     if pd.isna(media) or media == 0: return "💤 Inativo"
-    if media < 20: return "🛡️ Defesa"
-    if media < 40: return "🌿 Herbívoro"
-    if media < 60: return "🤝 Honra Tentou"
-    if media < 80: return "⚔️ Ofensivo"
+    if media < 25: return "🛡️ Defesa"
+    if media < 45: return "🌿 Herbívoro"
+    if media < 65: return "🤝 Honra Tentou"
+    if media < 85: return "⚔️ Ofensivo"
     return "💉 Viciado em Dopamina"
 
 # ==============================================================================
-# 3. BANCO DE DADOS
+# 3. BANCO DE DADOS (FIXED MIGRATION)
 # ==============================================================================
 class DatabaseAdapter:
     FILE_DB = 'leaguestats_bravura.csv'
     
     def __init__(self):
+        # Garante que o arquivo existe com TODAS as colunas
+        expected_cols = list(MatchStats.model_fields.keys())
+        
         if not os.path.exists(self.FILE_DB):
-            pd.DataFrame(columns=MatchStats.model_fields.keys()).to_csv(self.FILE_DB, index=False)
+            pd.DataFrame(columns=expected_cols).to_csv(self.FILE_DB, index=False)
         else:
             try:
                 df = pd.read_csv(self.FILE_DB)
+                # Migração: Adiciona colunas faltantes com 0
                 changed = False
-                for col in ['SoloKills', 'Plates', 'Multikills']:
+                for col in expected_cols:
                     if col not in df.columns:
-                        df[col] = 0
+                        if col in ['MatchID', 'Data', 'Jogador', 'Tipo', 'RankRiot']:
+                            df[col] = "Unknown"
+                        else:
+                            df[col] = 0
                         changed = True
-                if 'RankRiot' not in df.columns:
-                    df['RankRiot'] = 'Unranked'
-                    changed = True
+                
                 if changed: df.to_csv(self.FILE_DB, index=False)
             except: pass
 
@@ -161,6 +166,8 @@ class DatabaseAdapter:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
             if df.empty: return pd.DataFrame()
             df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(str(x).upper(), str(x).upper()))
+            
+            # Converte tudo que é numérico
             num_cols = ['Score', 'K', 'D', 'A', 'Part', 'DPM', 'Dano_Estruturas', 'Pinks', 'Timestamp', 'SoloKills', 'Plates', 'Multikills']
             for c in num_cols: 
                 if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
@@ -173,8 +180,12 @@ class DatabaseAdapter:
             stats_id = str(stats.MatchID)
             stats_player = str(stats.Jogador).upper()
             df['MatchID'] = df['MatchID'].astype(str)
+            
+            # Checa duplicidade
             if not ((df['MatchID'] == stats_id) & (df['Jogador'] == stats_player)).any():
-                pd.concat([df, pd.DataFrame([stats.model_dump()])], ignore_index=True).to_csv(self.FILE_DB, index=False)
+                # Transforma o objeto stats em DataFrame garantindo as colunas
+                new_row = pd.DataFrame([stats.model_dump()])
+                pd.concat([df, new_row], ignore_index=True).to_csv(self.FILE_DB, index=False)
                 return True
             return False
         except: return False
@@ -238,14 +249,15 @@ class RiotAdapter:
                     if p:
                         mins = d['info']['gameDuration']/60
                         
-                        solo_kills = p.get('challenges', {}).get('soloKills', 0)
-                        plates = p.get('challenges', {}).get('turretPlatesTaken', 0)
+                        # Extração Segura das Novas Métricas
+                        challenges = p.get('challenges', {})
+                        solo_kills = challenges.get('soloKills', 0)
+                        plates = challenges.get('turretPlatesTaken', 0)
                         
                         multi_score = (p.get('doubleKills', 0)*1) + (p.get('tripleKills', 0)*3) + (p.get('quadraKills', 0)*5) + (p.get('pentaKills', 0)*10)
 
-                        # Salva score SEM penalidade (Penalidade é aplicada no agregado)
                         sc = BravuraEngine.calculate_performance_score(
-                            p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), 
+                            p['win'], p.get('challenges', {}).get('killParticipation', 0), 
                             p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, 
                             p['visionWardsBoughtInGame'], solo_kills, plates, multi_score
                         )
@@ -258,7 +270,7 @@ class RiotAdapter:
                             Tipo='Flex', 
                             Vitoria=p['win'], 
                             Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], 
-                            Part=p['challenges'].get('killParticipation', 0), 
+                            Part=p.get('challenges', {}).get('killParticipation', 0), 
                             Dano_Estruturas=p['damageDealtToBuildings'], 
                             DPM=round(p['totalDamageDealtToChampions']/mins, 2), 
                             Pinks=p['visionWardsBoughtInGame'], 
@@ -296,7 +308,7 @@ def render():
                         for m in matches:
                             if db.save(m): saved += 1
                         total_added += saved
-                        if saved > 0: log.write(f"✅ +{saved} novos!")
+                        if saved > 0: log.write(f"✅ +{saved} novas!")
                     else: log.error(f"❌ Erro: {msg}")
                     time.sleep(0.2)
                 log.update(label="Fim!", state="complete", expanded=False)
@@ -308,7 +320,7 @@ def render():
         
         st.markdown("---")
         with st.expander("🛠️ Admin"):
-            if st.button("Resetar Tudo"):
+            if st.button("Resetar Tudo (Limpar Banco)"):
                 db.reset_database()
                 st.rerun()
 
@@ -318,40 +330,42 @@ def render():
 
     df_ranking = pd.DataFrame()
     if not df_f.empty:
-        # Filtra as últimas X partidas
+        # Janela de X partidas
         df_ranking = df_f.sort_values('Timestamp', ascending=False).groupby('Jogador').head(RANKING_WINDOW)
 
-    # --- LÓGICA DE AGREGADO (MÉDIA) ---
+    # --- LÓGICA DE SCORE AGREGADO (MÉDIA DE COMPORTAMENTO) ---
     ranking_data = []
     if not df_ranking.empty:
         for p in todos:
             d = df_ranking[df_ranking['Jogador'] == p]
             if d.empty: continue
             
-            # Médias dos Componentes
+            # --- CÁLCULO DETALHADO DO SCORE (MÉDIA DA JANELA) ---
+            # 1. Base
             avg_win = d['Vitoria'].mean() * 25.0
+            
+            # 2. Performance
             avg_kp = d['Part'].mean() * 40.0
             avg_dpm = d['DPM'].mean() / 100.0
             avg_obj = d['Dano_Estruturas'].mean() / 500.0
             avg_vis = d['Pinks'].mean() * 2.0
+            
+            # 3. Agressividade
             avg_x1 = d['SoloKills'].mean() * 2.0
             avg_plates = d['Plates'].mean() * 1.0
             avg_multi = d['Multikills'].mean() 
             
-            # Soma Base
+            # Soma Bruta
             final_score = avg_win + avg_kp + avg_dpm + avg_obj + avg_vis + avg_x1 + avg_plates + avg_multi
             
-            # Penalidades na MÉDIA (Holística)
+            # 4. Penalidades Holísticas
             penalidade = 0.0
             
-            # KDA Player: Média de Mortes <= 2 E Média de KP < 35%
-            avg_deaths_raw = d['D'].mean()
-            avg_kp_raw = d['Part'].mean()
-            
-            if avg_deaths_raw <= 2.0 and avg_kp_raw < 0.35:
+            # KDA Player: Se a MÉDIA de mortes for <= 2 e a MÉDIA de KP for < 35%
+            if d['D'].mean() <= 2.0 and d['Part'].mean() < 0.35:
                 penalidade -= 25.0
             
-            # Pacifista: Média de DPM < 300
+            # Pacifista: Se a MÉDIA de Dano por Minuto for < 300
             if d['DPM'].mean() < 300:
                 penalidade -= 10.0
             
@@ -360,10 +374,14 @@ def render():
             ranking_data.append({
                 'Jogador': p,
                 'Score Final': final_score,
+                'Jogos': len(d),
                 'DPM': d['DPM'].mean(),
                 'Max_DPM': d['DPM'].max(),
                 'Total_X1': d['SoloKills'].sum(),
-                'Jogos': len(d),
+                # Dados para Auditoria
+                'Pts_Win': avg_win, 'Pts_KP': avg_kp, 'Pts_Dano': avg_dpm, 
+                'Pts_Torre': avg_obj, 'Pts_Visao': avg_vis, 
+                'Pts_X1': avg_x1, 'Pts_Plates': avg_plates, 'Pts_Multi': avg_multi,
                 'Penalidade': penalidade
             })
             
@@ -378,15 +396,13 @@ def render():
             mvp_row = df_final.iloc[0]
             k1.metric("🔥 MVP (Score)", mvp_row['Jogador'], f"{mvp_row['Score Final']:.1f}")
             
-            # Maior Dano (Pico)
             dmg_king = df_final.loc[df_final['Max_DPM'].idxmax()]
             k2.metric("💀 Maior Dano (Pico)", dmg_king['Jogador'], f"{dmg_king['Max_DPM']:.0f}")
             
-            # Circo (Total X1 na janela)
             x1_king = df_final.loc[df_final['Total_X1'].idxmax()]
             k3.metric("🎪 Circo (Rei X1)", x1_king['Jogador'], f"{int(x1_king['Total_X1'])} Kills")
             
-            k4.metric("⚖️ Janela", f"Últimas {RANKING_WINDOW}")
+            k4.metric("⚖️ Janela Ranking", f"Últimas {RANKING_WINDOW}")
             
             st.markdown("---")
             c1, c2 = st.columns([1.5, 2])
@@ -418,10 +434,9 @@ def render():
 
     with t3:
         if not df_final.empty:
-            st.subheader("📊 Auditoria (Cálculo Agregado)")
-            # Exibe os dados já calculados no loop principal
-            cols = ['Jogador', 'Score Final', 'Penalidade', 'Total_X1', 'DPM']
-            st.dataframe(df_final[cols].sort_values('Score Final', ascending=False), use_container_width=True)
+            st.subheader(f"📊 Auditoria Detalhada (Pontos Agregados na Janela)")
+            audit_cols = ['Jogador', 'Score Final', 'Pts_Win', 'Pts_KP', 'Pts_Dano', 'Pts_Torre', 'Pts_Visao', 'Pts_X1', 'Pts_Plates', 'Pts_Multi', 'Penalidade']
+            st.dataframe(df_final[audit_cols].sort_values('Score Final', ascending=False).round(2), use_container_width=True)
 
     with t4:
         if not df_f.empty:
