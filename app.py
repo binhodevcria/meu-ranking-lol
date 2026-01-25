@@ -345,7 +345,8 @@ class RiotAdapter:
             # Usa rank cacheado ou busca novo (com debug)
             rank_atual = cached_rank if cached_rank else self.fetch_rank(puuid, debug_log=debug_log)
             
-            url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime={1735689600}&start=0&count={BATCH_SIZE}"
+            # Timestamp 1767225600 = 01/01/2026 00:00:00 UTC
+            url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime=1767225600&start=0&count={BATCH_SIZE}"
             m_ids = self.request_blindado(url)
             
             if not m_ids: return [], 0, "Sem Flex Recente"
@@ -420,24 +421,26 @@ def render():
                 log = st.status("Verificando partidas recentes...", expanded=True)
                 total_added = 0
                 
-                # OTIMIZAÇÃO: Pega todos os IDs existentes UMA VEZ
-                all_existing_ids = db.get_existing_match_ids()
-                log.write(f"📊 {len(all_existing_ids)} partidas já registradas")
-                
                 for p in SQUAD_LIST:
                     log.write(f"🔎 **{p['nick']}**...")
+                    
+                    # CORREÇÃO: Busca IDs existentes APENAS para este jogador
+                    # Isso garante que se A e B jogaram juntos, ambos salvam a partida
+                    existing_player_ids = db.get_existing_match_ids(jogador=p['nick'])
+                    
                     # Passa os IDs existentes e a função de log para debug
                     matches, count, msg = riot.fetch_recent_flex(
                         p['nick'], p['tag'], 
-                        existing_ids=all_existing_ids,
-                        debug_log=log.write  # Passa a função de log para debug
+                        existing_ids=existing_player_ids,
+                        debug_log=log.write
                     )
                     if matches is not None:
                         saved = 0
                         for m in matches:
                             if db.save(m): 
                                 saved += 1
-                                all_existing_ids.add(m.MatchID)  # Atualiza cache local
+                        total_added += saved
+                        if saved > 0: log.write(f"✅ +{saved} novas!")
                         total_added += saved
                         if saved > 0: log.write(f"✅ +{saved} novas!")
                     else: log.error(f"❌ Erro: {msg}")
