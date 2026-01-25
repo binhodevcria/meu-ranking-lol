@@ -17,8 +17,7 @@ from typing import Optional
 # ==============================================================================
 # 0. CONFIGURAÇÕES
 # ==============================================================================
-# Alvo de partidas por PESSOA REAL.
-# Se tiver 1 conta, busca 55. Se tiver 3, busca ~23 em cada (total ~70 com margem).
+# Alvo: 55 partidas por PESSOA (Gabinho = 55 em 1 conta / Guiza = ~23 em cada uma das 3)
 GLOBAL_TARGET = 55
 
 SQUAD_LIST = [
@@ -37,14 +36,13 @@ SQUAD_LIST = [
     {"nick": "Sugiro Correr", "tag": "BR1"}
 ]
 
-# Mapa de Unificação
 NOME_DISPLAY = {
     "GUIZINHA": "GUIZA",
     "EZFALSE": "GUIZA",
     "GUIZA": "GUIZA"
 }
 
-# Conta quantas contas cada pessoa tem para dividir a cota
+# Conta contas para divisão de cota
 ACCOUNT_COUNTS = {}
 for p in SQUAD_LIST:
     real_name = NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper())
@@ -53,7 +51,7 @@ for p in SQUAD_LIST:
 st.set_page_config(page_title="OFENSIVO SCORE", layout="wide", page_icon="⚔️")
 
 # ==============================================================================
-# 1. VISUAL (CLÁSSICO)
+# 1. VISUAL
 # ==============================================================================
 st.markdown("""
 <style>
@@ -122,9 +120,7 @@ class DatabaseAdapter:
         try:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
             if df.empty: return pd.DataFrame()
-            # Mapeia nomes (Guizinha -> Guiza)
             df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(str(x).upper(), str(x).upper()))
-            # Garante números
             num_cols = ['Score', 'K', 'D', 'A', 'Part', 'DPM', 'Dano_Estruturas', 'Pinks', 'Timestamp']
             for c in num_cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
             return df
@@ -154,7 +150,7 @@ class DatabaseAdapter:
 class RiotAdapter:
     def __init__(self, api_key):
         self.headers = {"X-Riot-Token": api_key}
-        self.season_start = 1735689600 
+        self.season_start = 1735689600 # 01/01/2026 (Epoch Seconds)
 
     def request_blindado(self, url):
         for i in range(3):
@@ -183,49 +179,57 @@ class RiotAdapter:
 
     def fetch_flex_quota(self, nome, tag, quota_limit):
         try:
-            # 1. PUUID
+            # 1. Resolve PUUID
             n_enc, t_enc = quote(nome.strip()), quote(tag.replace('#','').strip())
             acc, status = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n_enc}/{t_enc}")
             
-            if status == 403: return [], 0, "⛔ API Key Expirada"
-            if status == 404: return [], 0, "❌ Conta Errada"
-            if status != 200: return [], 0, f"⚠️ Erro {status}"
+            if status == 403: return [], 0, "⛔ Chave Vencida"
+            if status == 404: return [], 0, "❌ Conta não achada"
+            if status != 200: return [], 0, "⚠️ Erro API"
             
             puuid = acc['puuid']
             rank_atual = self.fetch_rank(puuid)
 
-            # 2. LISTA (Limitada pela cota)
+            # 2. Busca lista (QUEUE 440 = FLEX)
             url_ids = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&start=0&count={quota_limit}"
             m_ids, m_status = self.request_blindado(url_ids)
             
-            if m_status != 200: return [], 0, f"Erro busca ({m_status})"
-            if not m_ids: return [], 0, "Sem histórico"
+            if m_status != 200: return [], 0, "Erro lista"
+            if not m_ids: return [], 0, "Sem Flex Recente"
 
-            # 3. DETALHES
+            # 3. Baixa Detalhes (COM FILTRO RÍGIDO DE DATA)
             data = []
             for mid in m_ids:
                 d, d_status = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{mid}")
                 if d_status == 200 and d:
-                    p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
-                    if p:
-                        mins = d['info']['gameDuration']/60
-                        sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
-                        data.append(MatchStats(
-                            MatchID=str(mid), 
-                            Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), 
-                            Timestamp=d['info']['gameCreation'], 
-                            Jogador=nome.upper(), 
-                            Tipo='Flex', 
-                            Vitoria=p['win'], 
-                            Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], 
-                            Part=p['challenges'].get('killParticipation', 0), 
-                            Dano_Estruturas=p['damageDealtToBuildings'], 
-                            DPM=round(p['totalDamageDealtToChampions']/mins, 2), 
-                            Pinks=p['visionWardsBoughtInGame'], 
-                            RankRiot=rank_atual
-                        ))
-                time.sleep(0.1) 
+                    # >>> TRAVA DE SEGURANÇA 2026 <<<
+                    # Riot gameCreation é ms, season_start é s. Multiplicamos start por 1000.
+                    if d['info']['gameCreation'] < (self.season_start * 1000):
+                        continue # Ignora partida velha
+
+                    if d['info']['queueId'] == 440:
+                        p = next((x for x in d['info']['participants'] if x['puuid'] == puuid), None)
+                        if p:
+                            mins = d['info']['gameDuration']/60
+                            sc = BravuraEngine.calculate_score(p['win'], p['deaths'], p['challenges'].get('killParticipation', 0), p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, p['visionWardsBoughtInGame'])
+                            data.append(MatchStats(
+                                MatchID=str(mid), 
+                                Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), 
+                                Timestamp=d['info']['gameCreation'], 
+                                Jogador=nome.upper(), 
+                                Tipo='Flex', 
+                                Vitoria=p['win'], 
+                                Score=sc, K=p['kills'], D=p['deaths'], A=p['assists'], 
+                                Part=p['challenges'].get('killParticipation', 0), 
+                                Dano_Estruturas=p['damageDealtToBuildings'], 
+                                DPM=round(p['totalDamageDealtToChampions']/mins, 2), 
+                                Pinks=p['visionWardsBoughtInGame'], 
+                                RankRiot=rank_atual
+                            ))
+                time.sleep(0.1)
+            
             return data, len(data), "OK"
+
         except Exception as e: return [], 0, str(e)
 
 # ==============================================================================
@@ -244,19 +248,18 @@ def render():
         acao = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
         
         if acao == "Sincronizar Squad (API)":
-            if st.button(f"🔄 Sincronizar (Meta: {GLOBAL_TARGET})"):
+            if st.button(f"🔄 Sincronizar (Meta: {GLOBAL_TARGET}/pessoa)"):
                 log = st.status("Iniciando varredura proporcional...", expanded=True)
                 total_added = 0
                 
                 for p in SQUAD_LIST:
-                    # Lógica de Cota Proporcional (Divisão)
                     real_name = NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper())
                     num_accs = ACCOUNT_COUNTS.get(real_name, 1)
                     
-                    # Se tiver 1 conta, busca 55. Se tiver 3, busca 55/3 + 5 = ~23 em cada.
+                    # COTA POR CONTA: 55 totais / numero de contas + margem
                     quota = int(GLOBAL_TARGET / num_accs) + 5
                     
-                    log.write(f"🔎 **{p['nick']}**: Buscando até {quota} Flex...")
+                    log.write(f"🔎 **{p['nick']}**: Buscando até {quota} Flex (2026)...")
                     matches, count, msg = riot.fetch_flex_quota(p['nick'], p['tag'], quota)
                     
                     if count > 0:
@@ -265,7 +268,7 @@ def render():
                             if db.save(m): saved += 1
                         total_added += saved
                         if saved > 0: log.write(f"✅ +{saved} novos!")
-                        else: log.write(f"💤 Nada novo.")
+                        else: log.write(f"💤 {count} checados (sem novidades).")
                     elif "Erro" in msg or "Conta" in msg:
                         log.error(f"❌ {msg}")
                     else:
@@ -304,7 +307,7 @@ def render():
     todos = sorted(list(set(NOME_DISPLAY.get(p['nick'].upper(), p['nick'].upper()) for p in SQUAD_LIST)))
     df_f = df[df['Tipo'] != 'Custom'] if not df.empty else pd.DataFrame()
 
-    # --- BALANCEAMENTO VISUAL (Achatar a Curva para o Ranking se necessário) ---
+    # --- BALANCEAMENTO VISUAL ---
     df_ranking = df_f.copy()
     if not df_f.empty:
         counts = df_f['Jogador'].value_counts()
@@ -368,13 +371,18 @@ def render():
     with t3:
         if not df_ranking.empty:
             st.subheader(f"📊 Auditoria")
+            # CORREÇÃO DO ERRO ANTERIOR: CRIA COLUNAS ANTES DE AGRUPAR
             df_a = df_ranking.copy()
-            df_a['Pts_KP (+40)'] = df_a['Part'] * 40
-            df_a['Pts_DPM (/100)'] = df_a['DPM'] / 100
-            df_a['Pts_Torre (/500)'] = df_a['Dano_Estruturas'] / 500
-            df_a['Pts_Visao (x1)'] = df_a['Pinks']
-            df_a['Penal_Medo (-25)'] = np.where((df_a['D'] <= 2) & (df_a['Part'] < 0.35), -25, 0)
-            audit = df_a.groupby('Jogador').agg({'Score':'mean', 'Pts_KP':'mean', 'Pts_DPM':'mean', 'Pts_Torre':'mean', 'Pts_Visao':'mean', 'Penal_Medo':'mean'}).round(2).sort_values('Score', ascending=False)
+            df_a['Pts_KP'] = df_a['Part'] * 40
+            df_a['Pts_DPM'] = df_a['DPM'] / 100
+            df_a['Pts_Torre'] = df_a['Dano_Estruturas'] / 500
+            df_a['Pts_Visao'] = df_a['Pinks']
+            df_a['Penal_Medo'] = np.where((df_a['D'] <= 2) & (df_a['Part'] < 0.35), -25, 0)
+            
+            audit = df_a.groupby('Jogador').agg({
+                'Score': 'mean', 'Pts_KP': 'mean', 'Pts_DPM': 'mean', 
+                'Pts_Torre': 'mean', 'Pts_Visao': 'mean', 'Penal_Medo': 'mean'
+            }).round(2).sort_values('Score', ascending=False)
             st.dataframe(audit, use_container_width=True)
 
     with t4:
