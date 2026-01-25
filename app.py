@@ -186,7 +186,7 @@ def get_rank_bravura(media):
     if media < 25: return "🛡️ Defesa"
     if media < 45: return "🌿 Herbívoro"
     if media < 65: return "🤝 Honra Tentou"
-    if media < 85: return "⚔️ Ofensivo"
+    if media < 80: return "⚔️ Ofensivo"
     return "💉 Viciado em Dopamina"
 
 # ==============================================================================
@@ -326,12 +326,13 @@ class RiotAdapter:
             if debug_log: debug_log(f"❌ {str(e)[:30]}")
             return "N/D"
 
-    def fetch_recent_flex(self, nome, tag, existing_ids=None, cached_rank=None, debug_log=None):
+    def fetch_recent_flex(self, nome, tag, existing_ids=None, cached_rank=None, debug_log=None, manual_rank_override=None):
         """
         Busca partidas recentes de Flex.
         - existing_ids: set de MatchIDs já salvos (para pular download)
         - cached_rank: rank já obtido (para evitar chamadas extras)
         - debug_log: função para logging de debug
+        - manual_rank_override: rank definido manualmente no admin
         """
         try:
             if existing_ids is None:
@@ -342,8 +343,12 @@ class RiotAdapter:
             if not acc: return None, 0, "Conta não achada"
             puuid = acc['puuid']
             
-            # Usa rank cacheado ou busca novo (com debug)
-            rank_atual = cached_rank if cached_rank else self.fetch_rank(puuid, debug_log=debug_log)
+            # Prioridade: 1. Override manual, 2. Cache, 3. API
+            if manual_rank_override:
+                rank_atual = manual_rank_override
+                if debug_log: debug_log(f"📌 Rank Manual: {rank_atual}")
+            else:
+                rank_atual = cached_rank if cached_rank else self.fetch_rank(puuid, debug_log=debug_log)
             
             # Timestamp 1767225600 = 01/01/2026 00:00:00 UTC
             url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime=1767225600&start=0&count={BATCH_SIZE}"
@@ -404,10 +409,70 @@ class RiotAdapter:
 # ==============================================================================
 # 5. RENDER UI
 # ==============================================================================
+# ==============================================================================
+# 6. MÓDULO GEMINI VISION
+# ==============================================================================
+class GeminiAdapter:
+    def __init__(self, api_key):
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
+
+    def analyze_screenshot(self, image, squad_nicks):
+        """
+        Analisa o print e extrai dados APENAS dos membros do squad encontrados.
+        Retorna lista de dicionários com os dados.
+        """
+        try:
+            prompt = f"""
+            Analyze this League of Legends post-game screenshot.
+            I have a list of known players (SQUAD): {json.dumps(squad_nicks)}.
+            
+            For EACH player from the SQUAD that you find in the image, extract:
+            - Champion Name (FoundPlayer)
+            - Kills / Deaths / Assists
+            - Vision Score (if visible, else 0)
+            - Damage to Champions (if visible, else 0)
+            - Damage to Turrets (if visible, else 0)
+            - CS (Creep Score)
+            - Game Duration (look for time in top right corner, mainly in minutes, e.g. 35)
+            - Win/Loss result (look for Victory/Defeat text)
+
+            Return the data EXCLUSIVELY in valid JSON format like this:
+            [
+              {{
+                "FoundPlayer": "NickMatched",
+                "Champion": "Ahri",
+                "K": 10, "D": 2, "A": 15,
+                "Vision": 25,
+                "DmgChamp": 25000,
+                "DmgTurret": 3000,
+                "CS": 200,
+                "DurationMinutes": 30,
+                "Win": true
+              }}
+            ]
+            If no squad player is found, return [].
+            """
+            
+            response = self.model.generate_content([prompt, image])
+            
+            # Limpeza do JSON (remove code blocks se existirem)
+            txt = response.text.replace("```json", "").replace("```", "").strip()
+            return json.loads(txt)
+        except Exception as e:
+            st.error(f"Erro no Gemini: {e}")
+            return []
+
+# ==============================================================================
+# 5. RENDER UI
+# ==============================================================================
 def render():
     db = DatabaseAdapter()
     riot = RiotAdapter(st.secrets.get("RIOT_KEY", ""))
-    gemini = genai.GenerativeModel('models/gemini-1.5-flash') if st.secrets.get("GEMINI_KEY") else None
+    
+    # Inicializa Gemini Adapter
+    gemini_key = st.secrets.get("GEMINI_KEY")
+    gemini_adapter = GeminiAdapter(gemini_key) if gemini_key else None
 
     st.markdown("<div class='title-text'>⚔️ OFENSIVO SCORE ⚔️</div>", unsafe_allow_html=True)
     st.markdown("<div class='subtitle-text'>criado para jogadores ofensivos que gostam de rir e vencer</div>", unsafe_allow_html=True)
@@ -425,14 +490,14 @@ def render():
                     log.write(f"🔎 **{p['nick']}**...")
                     
                     # CORREÇÃO: Busca IDs existentes APENAS para este jogador
-                    # Isso garante que se A e B jogaram juntos, ambos salvam a partida
                     existing_player_ids = db.get_existing_match_ids(jogador=p['nick'])
                     
-                    # Passa os IDs existentes e a função de log para debug
+                    # Passa os IDs existentes, log de debug e OVERRIDE DE RANK
                     matches, count, msg = riot.fetch_recent_flex(
                         p['nick'], p['tag'], 
                         existing_ids=existing_player_ids,
-                        debug_log=log.write
+                        debug_log=log.write,
+                        manual_rank_override=p.get('manual_rank')
                     )
                     if matches is not None:
                         saved = 0
@@ -441,16 +506,90 @@ def render():
                                 saved += 1
                         total_added += saved
                         if saved > 0: log.write(f"✅ +{saved} novas!")
-                        total_added += saved
-                        if saved > 0: log.write(f"✅ +{saved} novas!")
                     else: log.error(f"❌ Erro: {msg}")
-                    # Removido time.sleep(0.2) - desnecessário com rate limiting
+
                 log.update(label="Fim!", state="complete", expanded=False)
                 if total_added > 0:
                     st.success(f"{total_added} partidas adicionadas!")
                     time.sleep(2)
                     st.rerun()
                 else: st.info("Tudo em dia.")
+
+        elif acao == "Subir Print (Custom)":
+            st.markdown("### 📸 Upload de Print (Beta)")
+            
+            if not gemini_adapter:
+                st.error("⚠️ Configure a GEMINI_KEY no secrets (.streamlit/secrets.toml)")
+            else:
+                with st.form("upload_form"):
+                    uploaded_file = st.file_uploader("Escolha o print do final da partida", type=['png', 'jpg', 'jpeg'])
+                    
+                    if st.form_submit_button("🚀 Processar com Gemini"):
+                        if uploaded_file:
+                            with st.spinner("🧠 Gemini analisando imagem..."):
+                                try:
+                                    img = Image.open(uploaded_file)
+                                    squad_nicks = [p['nick'] for p in SQUAD_LIST]
+                                    
+                                    # CHAMA O GEMINI
+                                    results = gemini_adapter.analyze_screenshot(img, squad_nicks)
+                                    
+                                    if results:
+                                        saved_count = 0
+                                        for res in results:
+                                            # Calcula Score usando BravuraEngine
+                                            # Nota: Print não tem multikills/plates geralmente, assumimos 0 ou tentamos estimar
+                                            # Aqui assumimos 0 para dados não visíveis
+                                            
+                                            mins = res.get('DurationMinutes', 20)
+                                            if mins < 1: mins = 1
+                                            
+                                            score = BravuraEngine.calculate_performance_score(
+                                                vitoria=res.get('Win', False),
+                                                part=0.5, # KP estimado (difícil pegar do print sem calcular totais)
+                                                dano_est=res.get('DmgTurret', 0),
+                                                dano_camp=res.get('DmgChamp', 0),
+                                                minutos=mins,
+                                                pinks=res.get('Vision', 0), # Usando visão total como proxy de pinks ou assumindo visãoSCORE
+                                                solo_kills=0, # Não tem no print
+                                                plates=0,     # Não tem no print
+                                                multi_score=0 # Não tem no print
+                                            )
+                                            
+                                            # Cria objeto MatchStats
+                                            stats = MatchStats(
+                                                MatchID=f"CUSTOM_{int(time.time())}_{res['FoundPlayer']}", # ID ùnico
+                                                Data=datetime.now().strftime('%d/%m'),
+                                                Timestamp=int(time.time()) * 1000,
+                                                Jogador=res['FoundPlayer'],
+                                                Tipo='Custom',
+                                                Vitoria=res.get('Win', False),
+                                                Score=score,
+                                                K=res.get('K', 0), D=res.get('D', 0), A=res.get('A', 0),
+                                                Part=0.0, # Difícil calcular KP só com print individual
+                                                Dano_Estruturas=res.get('DmgTurret', 0),
+                                                DPM=round(res.get('DmgChamp', 0)/mins, 2),
+                                                Pinks=0, # Visão score != Pinks, mas deixamos 0 por segurança ou adaptamos
+                                                SoloKills=0, Plates=0, Multikills=0,
+                                                Champion=res.get('Champion', 'Unknown'),
+                                                RankRiot="Custom"
+                                            )
+                                            
+                                            if db.save(stats):
+                                                st.success(f"✅ Dados de {res['FoundPlayer']} salvos! (Score: {score})")
+                                                saved_count += 1
+                                            else:
+                                                st.warning(f"⚠️ {res['FoundPlayer']} já salvo ou erro.")
+                                        
+                                        if saved_count > 0:
+                                            time.sleep(2)
+                                            st.rerun()
+                                    else:
+                                        st.warning("Nenhum jogador do squad encontrado no print.")
+                                except Exception as e:
+                                    st.error(f"Erro ao processar: {e}")
+                        else:
+                            st.warning("Faça upload de uma imagem!")
         
         st.markdown("---")
         with st.expander("🛠️ Admin - Gerenciar Squad"):
@@ -460,14 +599,22 @@ def render():
             if 'temp_squad' not in st.session_state:
                 st.session_state.temp_squad = SQUAD_LIST.copy()
             
-            # Mostrar jogadores atuais com botão de remover
+            # Mostrar jogadores atuais com botão de remover e RANK MANUAL
             for i, player in enumerate(st.session_state.temp_squad):
-                col1, col2, col3 = st.columns([3, 2, 1])
-                with col1:
-                    st.text(player['nick'])
-                with col2:
-                    st.text(f"#{player['tag']}")
-                with col3:
+                c1, c2, c3, c4 = st.columns([2, 1.5, 2, 0.5])
+                with c1: st.text(f"{player['nick']}")
+                with c2: st.text(f"#{player['tag']}")
+                with c3:
+                    new_rank = st.text_input(
+                        "Elo Manual", 
+                        value=player.get('manual_rank', ''), 
+                        key=f"rank_{i}", 
+                        help="Ex: EMERALD IV",
+                        label_visibility="collapsed",
+                        placeholder="Ex: GOLD I"
+                    )
+                    player['manual_rank'] = new_rank
+                with c4:
                     if st.button("❌", key=f"remove_{i}"):
                         st.session_state.temp_squad.pop(i)
                         st.rerun()
