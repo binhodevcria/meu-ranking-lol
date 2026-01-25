@@ -286,12 +286,23 @@ class RiotAdapter:
         try:
             summ = self.request_blindado(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}")
             if not summ: 
-                if debug_log: debug_log("⚠️ Summoner não encontrado")
+                if debug_log: debug_log("⚠️ Summoner não encontrado (API retornou None)")
                 return "Unranked"
             
-            if debug_log: debug_log(f"📋 Summoner ID: {summ.get('id', 'N/A')[:10]}...")
+            # Debug: mostra as chaves disponíveis na resposta
+            if debug_log: 
+                keys = list(summ.keys()) if isinstance(summ, dict) else "Não é dict"
+                debug_log(f"📋 Chaves da resposta: {keys}")
             
-            leagues = self.request_blindado(f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{summ['id']}")
+            # Tenta pegar o ID do summoner (pode ser 'id' ou 'summonerId')
+            summoner_id = summ.get('id') or summ.get('summonerId')
+            if not summoner_id:
+                if debug_log: debug_log(f"⚠️ Sem ID na resposta. Dados: {str(summ)[:100]}...")
+                return "Unranked"
+            
+            if debug_log: debug_log(f"📋 Summoner ID: {str(summoner_id)[:15]}...")
+            
+            leagues = self.request_blindado(f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{summoner_id}")
             
             if debug_log: 
                 if leagues:
