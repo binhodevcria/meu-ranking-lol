@@ -281,48 +281,50 @@ class RiotAdapter:
             except: return None
         return None
 
-    def fetch_rank(self, puuid, debug_log=None):
-        """Busca rank de Flex do jogador. debug_log é uma função opcional para logging."""
+    def fetch_rank(self, puuid, debug_log=None, game_name=None):
+        """
+        Busca rank de Flex do jogador.
+        Retorna o rank ou 'N/D' se API falhar.
+        """
         try:
+            # Tenta a API de Summoner por PUUID
             summ = self.request_blindado(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}")
+            
             if not summ: 
-                if debug_log: debug_log("⚠️ Summoner não encontrado (API retornou None)")
-                return "Unranked"
+                if debug_log: debug_log("⚠️ Summoner não encontrado")
+                return "N/D"
             
-            # Debug: mostra as chaves disponíveis na resposta
-            if debug_log: 
-                keys = list(summ.keys()) if isinstance(summ, dict) else "Não é dict"
-                debug_log(f"📋 Chaves da resposta: {keys}")
+            # Tenta pegar o ID do summoner
+            summoner_id = summ.get('id') or summ.get('summonerId') or summ.get('encryptedSummonerId')
             
-            # Tenta pegar o ID do summoner (pode ser 'id' ou 'summonerId')
-            summoner_id = summ.get('id') or summ.get('summonerId')
+            # Se não encontrou ID, a API da Riot está com problemas (bug conhecido)
             if not summoner_id:
-                if debug_log: debug_log(f"⚠️ Sem ID na resposta. Dados: {str(summ)[:100]}...")
-                return "Unranked"
+                if debug_log: debug_log("⚠️ API Riot sem ID (bug conhecido)")
+                return "N/D"  # Não Disponível - problema na API
             
-            if debug_log: debug_log(f"📋 Summoner ID: {str(summoner_id)[:15]}...")
+            if debug_log: debug_log(f"📋 ID OK")
             
             leagues = self.request_blindado(f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{summoner_id}")
             
-            if debug_log: 
-                if leagues:
-                    filas = [l.get('queueType', 'N/A') for l in leagues]
-                    debug_log(f"📊 Filas encontradas: {filas}")
-                else:
-                    debug_log("⚠️ Nenhuma liga encontrada")
-            
             if leagues:
+                # Tenta Flex primeiro
                 flex = next((l for l in leagues if l['queueType'] == "RANKED_FLEX_SR"), None)
                 if flex: 
                     rank = f"{flex['tier']} {flex['rank']}"
-                    if debug_log: debug_log(f"✅ Rank Flex: {rank}")
+                    if debug_log: debug_log(f"✅ {rank}")
                     return rank
-                else:
-                    if debug_log: debug_log("⚠️ Sem rank de FLEX (só Solo/Duo?)")
+                
+                # Fallback para Solo/Duo
+                solo = next((l for l in leagues if l['queueType'] == "RANKED_SOLO_5x5"), None)
+                if solo:
+                    rank = f"{solo['tier']} {solo['rank']} (Solo)"
+                    if debug_log: debug_log(f"✅ {rank}")
+                    return rank
+                    
             return "Unranked"
         except Exception as e: 
-            if debug_log: debug_log(f"❌ Erro: {str(e)}")
-            return "Unranked"
+            if debug_log: debug_log(f"❌ {str(e)[:30]}")
+            return "N/D"
 
     def fetch_recent_flex(self, nome, tag, existing_ids=None, cached_rank=None, debug_log=None):
         """
