@@ -8,33 +8,88 @@ import os
 import json
 import time
 import numpy as np
+import base64
 from datetime import datetime
 from PIL import Image
 from pydantic import BaseModel
 from urllib.parse import quote
 from typing import Optional
+from itertools import combinations
 
 # ==============================================================================
 # 0. CONFIGURAÇÕES
 # ==============================================================================
 BATCH_SIZE = 20 
 RANKING_WINDOW = 15 
+SQUAD_FILE = 'squad.json'
 
-SQUAD_LIST = [
-    {"nick": "Gabinho", "tag": "INTEN"},
-    {"nick": "Naguinha", "tag": "INTEN"},
-    {"nick": "Guiza", "tag": "INTEN"},
-    {"nick": "Guizinha", "tag": "BR1"},
-    {"nick": "Ezfalse", "tag": "BR1"},
-    {"nick": "Rebeca Diana", "tag": "eGIRL"},
-    {"nick": "Sylas 1v9", "tag": "BR1"},
-    {"nick": "O Magro de OZ", "tag": "BR1"},
-    {"nick": "PabIo Escobar", "tag": "INTEN"},
-    {"nick": "Murakami UHULL", "tag": "BR1"},
-    {"nick": "FEFE TA DE SWAIN", "tag": "DEMON"},
-    {"nick": "MEC Viper", "tag": "MEC"},
-    {"nick": "Sugiro Correr", "tag": "BR1"}
-]
+# GitHub Config (para commit automático)
+GITHUB_REPO = "binhodevcria/meu-ranking-lol"
+GITHUB_BRANCH = "main"
+
+def load_squad():
+    """Carrega a lista de jogadores do arquivo JSON externo"""
+    try:
+        if os.path.exists(SQUAD_FILE):
+            with open(SQUAD_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except: pass
+    # Fallback se o arquivo não existir
+    return [
+        {"nick": "Gabinho", "tag": "INTEN"},
+        {"nick": "Naguinha", "tag": "INTEN"},
+        {"nick": "Guiza", "tag": "INTEN"}
+    ]
+
+def github_commit_squad(squad_data, github_token, repo=GITHUB_REPO, branch=GITHUB_BRANCH):
+    """
+    Faz commit do squad.json diretamente no GitHub via API
+    Retorna (sucesso: bool, mensagem: str)
+    """
+    try:
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        # 1. Pegar SHA atual do arquivo (necessário para update)
+        url_get = f"https://api.github.com/repos/{repo}/contents/{SQUAD_FILE}?ref={branch}"
+        resp_get = requests.get(url_get, headers=headers)
+        
+        if resp_get.status_code == 404:
+            # Arquivo não existe, será criado
+            current_sha = None
+        elif resp_get.status_code == 200:
+            current_sha = resp_get.json().get('sha')
+        else:
+            return False, f"Erro ao acessar repo: {resp_get.status_code}"
+        
+        # 2. Preparar conteúdo em base64
+        content_json = json.dumps(squad_data, indent=4, ensure_ascii=False)
+        content_b64 = base64.b64encode(content_json.encode('utf-8')).decode('utf-8')
+        
+        # 3. Fazer commit
+        url_put = f"https://api.github.com/repos/{repo}/contents/{SQUAD_FILE}"
+        payload = {
+            "message": f"🎮 Squad atualizado via OFENSIVO SCORE",
+            "content": content_b64,
+            "branch": branch
+        }
+        if current_sha:
+            payload["sha"] = current_sha
+        
+        resp_put = requests.put(url_put, headers=headers, json=payload)
+        
+        if resp_put.status_code in [200, 201]:
+            return True, "✅ Commit realizado com sucesso!"
+        else:
+            error_msg = resp_put.json().get('message', 'Erro desconhecido')
+            return False, f"Erro no commit: {error_msg}"
+            
+    except Exception as e:
+        return False, f"Erro: {str(e)}"
+
+SQUAD_LIST = load_squad()
 
 NOME_DISPLAY = {
     "GUIZINHA": "GUIZA",
@@ -100,6 +155,7 @@ class MatchStats(BaseModel):
     Vitoria: bool; Score: float; K: int; D: int; A: int; Part: float
     Dano_Estruturas: int; DPM: float; Pinks: int
     SoloKills: int; Plates: int; Multikills: int
+    Champion: Optional[str] = "Unknown"
     RankRiot: Optional[str] = "Unranked"
 
 class BravuraEngine:
@@ -148,11 +204,11 @@ class DatabaseAdapter:
         else:
             try:
                 df = pd.read_csv(self.FILE_DB)
-                # Migração: Adiciona colunas faltantes com 0
+                # Migração: Adiciona colunas faltantes com valores padrão
                 changed = False
                 for col in expected_cols:
                     if col not in df.columns:
-                        if col in ['MatchID', 'Data', 'Jogador', 'Tipo', 'RankRiot']:
+                        if col in ['MatchID', 'Data', 'Jogador', 'Tipo', 'RankRiot', 'Champion']:
                             df[col] = "Unknown"
                         else:
                             df[col] = 0
@@ -201,7 +257,7 @@ class DatabaseAdapter:
 class RiotAdapter:
     def __init__(self, api_key):
         self.headers = {"X-Riot-Token": api_key}
-        self.season_start = 1735689600000 
+        self.season_start = 1767225600000 # 01/01/2026 00:00:00 UTC
 
     def request_blindado(self, url):
         for i in range(3):
@@ -275,6 +331,7 @@ class RiotAdapter:
                             DPM=round(p['totalDamageDealtToChampions']/mins, 2), 
                             Pinks=p['visionWardsBoughtInGame'], 
                             SoloKills=solo_kills, Plates=plates, Multikills=multi_score,
+                            Champion=p.get('championName', 'Unknown'),
                             RankRiot=rank_atual
                         ))
                 time.sleep(0.1)
@@ -319,8 +376,100 @@ def render():
                 else: st.info("Tudo em dia.")
         
         st.markdown("---")
-        with st.expander("🛠️ Admin"):
-            if st.button("Resetar Tudo (Limpar Banco)"):
+        with st.expander("🛠️ Admin - Gerenciar Squad"):
+            st.markdown("### 👥 Squad Atual")
+            
+            # Inicializa session_state para edição do squad
+            if 'temp_squad' not in st.session_state:
+                st.session_state.temp_squad = SQUAD_LIST.copy()
+            
+            # Mostrar jogadores atuais com botão de remover
+            for i, player in enumerate(st.session_state.temp_squad):
+                col1, col2, col3 = st.columns([3, 2, 1])
+                with col1:
+                    st.text(player['nick'])
+                with col2:
+                    st.text(f"#{player['tag']}")
+                with col3:
+                    if st.button("❌", key=f"remove_{i}"):
+                        st.session_state.temp_squad.pop(i)
+                        st.rerun()
+            
+            st.markdown("---")
+            st.markdown("### ➕ Adicionar Jogador")
+            
+            col_nick, col_tag = st.columns([3, 2])
+            with col_nick:
+                new_nick = st.text_input("Nick do jogador:", key="new_nick", placeholder="Ex: NovoJogador")
+            with col_tag:
+                new_tag = st.text_input("Tag:", key="new_tag", placeholder="Ex: BR1")
+            
+            if st.button("➕ Adicionar ao Squad"):
+                if new_nick and new_tag:
+                    st.session_state.temp_squad.append({"nick": new_nick.strip(), "tag": new_tag.strip()})
+                    st.success(f"✅ {new_nick}#{new_tag} adicionado!")
+                    st.rerun()
+                else:
+                    st.warning("Preencha nick e tag!")
+            
+            # Verificar se houve alterações
+            if st.session_state.temp_squad != SQUAD_LIST:
+                st.markdown("---")
+                st.success("✅ **Alterações detectadas!**")
+                
+                # Gerar JSON formatado
+                json_output = json.dumps(st.session_state.temp_squad, indent=4, ensure_ascii=False)
+                
+                with st.expander("📋 Ver JSON gerado"):
+                    st.code(json_output, language="json")
+                
+                st.markdown("---")
+                st.markdown("### 🚀 Salvar no GitHub")
+                
+                # Input para GitHub Token
+                github_token = st.text_input(
+                    "GitHub Personal Access Token:", 
+                    type="password",
+                    help="Crie um token em GitHub → Settings → Developer settings → Personal access tokens",
+                    key="github_token"
+                )
+                
+                # Input para o repositório (pré-preenchido mas editável)
+                github_repo = st.text_input(
+                    "Repositório (usuario/repo):",
+                    value=GITHUB_REPO,
+                    help="Ex: gabri/LoL_Rank",
+                    key="github_repo"
+                )
+                
+                col_commit, col_undo = st.columns(2)
+                
+                with col_commit:
+                    if st.button("📤 Fazer Commit no GitHub", type="primary"):
+                        if github_token and github_repo:
+                            with st.spinner("Fazendo commit..."):
+                                success, msg = github_commit_squad(
+                                    st.session_state.temp_squad, 
+                                    github_token, 
+                                    repo=github_repo
+                                )
+                            if success:
+                                st.success(msg)
+                                st.balloons()
+                                st.info("🔄 O app será atualizado automaticamente em alguns segundos!")
+                            else:
+                                st.error(msg)
+                        else:
+                            st.warning("Preencha o token e o repositório!")
+                
+                with col_undo:
+                    if st.button("🔄 Desfazer alterações"):
+                        st.session_state.temp_squad = SQUAD_LIST.copy()
+                        st.rerun()
+            
+            st.markdown("---")
+            st.markdown("### 🗑️ Resetar Dados")
+            if st.button("⚠️ Resetar Tudo (Limpar Partidas)"):
                 db.reset_database()
                 st.rerun()
 
@@ -387,7 +536,11 @@ def render():
             
     df_final = pd.DataFrame(ranking_data).sort_values('Score Final', ascending=False)
 
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs(["🏆 RANKING", "🎖️ MEDALHAS", "📊 TRANSPARÊNCIA", "⚖️ ELOS", "⚓ AFUNDAMENTO", "🚪 QUEM SAI?", "👹 CUSTOMS"])
+    t1, t2, t3, t4, t5, t6, t7, t8, t9, t10 = st.tabs([
+        "🏆 RANKING", "🎖️ MEDALHAS", "📊 TRANSPARÊNCIA", "⚖️ ELOS", 
+        "⚓ AFUNDAMENTO", "🚪 QUEM SAI?", "👹 CUSTOMS",
+        "📈 RECORDES", "🎮 CAMPEÕES", "👥 DUOS"
+    ])
 
     with t1:
         if not df_final.empty:
@@ -475,7 +628,209 @@ def render():
             if not df_c.empty:
                 st.dataframe(df_c.groupby('Jogador')['Score'].mean().sort_values(ascending=False), use_container_width=True)
 
+    # ==================== NOVA ABA: RECORDES ====================
+    with t8:
+        st.subheader("📈 Recordes Pessoais")
+        if not df_f.empty:
+            st.markdown("*Os maiores feitos de cada jogador na temporada*")
+            
+            # Recordes por categoria
+            records_data = []
+            for jogador in df_f['Jogador'].unique():
+                jdf = df_f[df_f['Jogador'] == jogador]
+                if jdf.empty: continue
+                
+                # Pega a partida com maior score, maior DPM, etc.
+                max_score_row = jdf.loc[jdf['Score'].idxmax()]
+                max_dpm_row = jdf.loc[jdf['DPM'].idxmax()]
+                max_kills_row = jdf.loc[jdf['K'].idxmax()]
+                max_x1_row = jdf.loc[jdf['SoloKills'].idxmax()]
+                
+                records_data.append({
+                    'Jogador': jogador,
+                    '🏆 Maior Score': f"{max_score_row['Score']:.1f}",
+                    '💥 Maior DPM': f"{max_dpm_row['DPM']:.0f}",
+                    '⚔️ Mais Kills': int(max_kills_row['K']),
+                    '🎪 Mais X1': int(max_x1_row['SoloKills']),
+                    'Jogos': len(jdf)
+                })
+            
+            if records_data:
+                df_records = pd.DataFrame(records_data)
+                st.dataframe(df_records.set_index('Jogador'), use_container_width=True)
+                
+                # Top 3 recordes visuais
+                st.markdown("---")
+                st.markdown("### 🥇 Hall da Fama")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                # Maior Score de todos
+                best_score = df_f.loc[df_f['Score'].idxmax()]
+                with col1:
+                    st.markdown(f"""
+                    <div class='medal-box'>
+                        <div class='medal-icon'>🔥</div>
+                        <div class='medal-title'>MAIOR SCORE</div>
+                        <div class='medal-player'>{best_score['Jogador']}</div>
+                        <span class='medal-desc'>{best_score['Score']:.1f} pts em {best_score['Data']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Maior DPM de todos
+                best_dpm = df_f.loc[df_f['DPM'].idxmax()]
+                with col2:
+                    st.markdown(f"""
+                    <div class='medal-box'>
+                        <div class='medal-icon'>💥</div>
+                        <div class='medal-title'>MAIOR DANO</div>
+                        <div class='medal-player'>{best_dpm['Jogador']}</div>
+                        <span class='medal-desc'>{best_dpm['DPM']:.0f} DPM em {best_dpm['Data']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Mais kills em uma partida
+                best_kills = df_f.loc[df_f['K'].idxmax()]
+                with col3:
+                    st.markdown(f"""
+                    <div class='medal-box'>
+                        <div class='medal-icon'>⚔️</div>
+                        <div class='medal-title'>MAIS ABATES</div>
+                        <div class='medal-player'>{best_kills['Jogador']}</div>
+                        <span class='medal-desc'>{int(best_kills['K'])} kills em {best_kills['Data']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+        else:
+            st.info("Sem dados para recordes.")
+
+    # ==================== NOVA ABA: CAMPEÕES ====================
+    with t9:
+        st.subheader("🎮 Estatísticas por Campeão")
+        if not df_f.empty and 'Champion' in df_f.columns:
+            # Filtro de jogador
+            selected_player = st.selectbox("Selecione o jogador:", ["Todos"] + sorted(df_f['Jogador'].unique().tolist()))
+            
+            if selected_player != "Todos":
+                df_champ = df_f[df_f['Jogador'] == selected_player]
+            else:
+                df_champ = df_f
+            
+            # Agregar por campeão
+            champ_stats = df_champ.groupby('Champion').agg({
+                'Vitoria': ['sum', 'count'],
+                'K': 'mean',
+                'D': 'mean', 
+                'A': 'mean',
+                'DPM': 'mean',
+                'Score': 'mean'
+            }).round(2)
+            
+            champ_stats.columns = ['Vitórias', 'Jogos', 'K (avg)', 'D (avg)', 'A (avg)', 'DPM (avg)', 'Score (avg)']
+            champ_stats['Winrate'] = ((champ_stats['Vitórias'] / champ_stats['Jogos']) * 100).round(1).astype(str) + '%'
+            champ_stats = champ_stats.sort_values('Jogos', ascending=False)
+            
+            # Filtrar campeões "Unknown" se houver muitos dados reais
+            if 'Unknown' in champ_stats.index and len(champ_stats) > 1:
+                unknown_count = champ_stats.loc['Unknown', 'Jogos'] if 'Unknown' in champ_stats.index else 0
+                total_count = champ_stats['Jogos'].sum()
+                if unknown_count < total_count * 0.5:  # Se menos de 50% é Unknown
+                    st.warning("⚠️ Alguns dados antigos não têm campeão registrado (mostrados como 'Unknown'). Sincronize novamente para atualizar!")
+            
+            st.dataframe(champ_stats[['Jogos', 'Winrate', 'K (avg)', 'D (avg)', 'A (avg)', 'DPM (avg)', 'Score (avg)']], use_container_width=True)
+            
+            # Gráfico de pizza dos campeões mais jogados
+            if len(champ_stats) > 1:
+                top_champs = champ_stats.head(8).reset_index()
+                fig = px.pie(top_champs, values='Jogos', names='Champion', 
+                            title='Top 8 Campeões Mais Jogados',
+                            template='plotly_dark',
+                            color_discrete_sequence=px.colors.qualitative.Set3)
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sem dados de campeões. Sincronize para coletar!")
+
+    # ==================== NOVA ABA: DUOS ====================
+    with t10:
+        st.subheader("👥 Sinergia entre Jogadores")
+        if not df_f.empty:
+            st.markdown("*Análise de performance quando jogadores jogam juntos*")
+            
+            # Identificar partidas com múltiplos jogadores do squad
+            match_players = df_f.groupby('MatchID')['Jogador'].apply(list).reset_index()
+            match_results = df_f.groupby('MatchID')['Vitoria'].first().reset_index()
+            
+            # Calcular duos
+            duo_stats = {}
+            for _, row in match_players.iterrows():
+                players = row['Jogador']
+                if len(players) >= 2:
+                    match_id = row['MatchID']
+                    won = match_results[match_results['MatchID'] == match_id]['Vitoria'].values[0]
+                    
+                    # Para cada par de jogadores na partida
+                    for duo in combinations(sorted(players), 2):
+                        duo_key = f"{duo[0]} & {duo[1]}"
+                        if duo_key not in duo_stats:
+                            duo_stats[duo_key] = {'wins': 0, 'games': 0}
+                        duo_stats[duo_key]['games'] += 1
+                        if won:
+                            duo_stats[duo_key]['wins'] += 1
+            
+            if duo_stats:
+                # Converter para DataFrame
+                duo_data = []
+                for duo, stats in duo_stats.items():
+                    if stats['games'] >= 3:  # Mínimo 3 jogos juntos
+                        winrate = (stats['wins'] / stats['games']) * 100
+                        duo_data.append({
+                            'Dupla': duo,
+                            'Jogos Juntos': stats['games'],
+                            'Vitórias': stats['wins'],
+                            'Winrate': f"{winrate:.1f}%",
+                            'Winrate_num': winrate
+                        })
+                
+                if duo_data:
+                    df_duos = pd.DataFrame(duo_data).sort_values('Jogos Juntos', ascending=False)
+                    
+                    # Métricas principais
+                    col1, col2, col3 = st.columns(3)
+                    
+                    best_duo = df_duos.loc[df_duos['Winrate_num'].idxmax()]
+                    worst_duo = df_duos.loc[df_duos['Winrate_num'].idxmin()]
+                    most_games_duo = df_duos.iloc[0]
+                    
+                    with col1:
+                        st.metric("🏆 Melhor Duo", best_duo['Dupla'], f"{best_duo['Winrate']} WR")
+                    with col2:
+                        st.metric("🤝 Duo Mais Frequente", most_games_duo['Dupla'], f"{most_games_duo['Jogos Juntos']} jogos")
+                    with col3:
+                        st.metric("💀 Pior Duo", worst_duo['Dupla'], f"{worst_duo['Winrate']} WR")
+                    
+                    st.markdown("---")
+                    
+                    # Tabela completa
+                    st.dataframe(df_duos[['Dupla', 'Jogos Juntos', 'Vitórias', 'Winrate']], use_container_width=True)
+                    
+                    # Gráfico de barras horizontal
+                    fig = px.bar(df_duos.head(10), x='Winrate_num', y='Dupla', orientation='h',
+                                color='Winrate_num', color_continuous_scale='RdYlGn',
+                                title='Top 10 Duplas por Winrate',
+                                template='plotly_dark',
+                                labels={'Winrate_num': 'Winrate (%)'})
+                    fig.update_layout(yaxis={'categoryorder': 'total ascending'})
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Precisa de mais jogos em dupla (mínimo 3 juntos).")
+            else:
+                st.info("Sem dados de partidas em grupo ainda.")
+        else:
+            st.info("Sem dados para análise de duos.")
+
     st.markdown("<hr><div class='footer-group'>É o grupo</div><div class='footer-final'>deidara HO</div>", unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    render()
 
 if __name__ == "__main__":
     render()
