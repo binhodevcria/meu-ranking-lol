@@ -1,54 +1,77 @@
 [
     {
         "nick": "Gabinho",
-        "tag": "INTEN"
+        "tag": "INTEN",
+        "manual_rank": ""
     },
     {
         "nick": "Naguinha",
-        "tag": "INTEN"
+        "tag": "INTEN",
+        "manual_rank": ""
     },
     {
         "nick": "Guiza",
-        "tag": "INTEN"
+        "tag": "INTEN",
+        "manual_rank": ""
     },
     {
         "nick": "Guizinha",
-        "tag": "BR1"
+        "tag": "BR1",
+        "manual_rank": ""
     },
     {
         "nick": "Ezfalse",
-        "tag": "BR1"
+        "tag": "BR1",
+        "manual_rank": ""
     },
     {
         "nick": "Rebeca Diana",
-        "tag": "eGIRL"
+        "tag": "eGIRL",
+        "manual_rank": ""
     },
     {
         "nick": "Sylas 1v9",
-        "tag": "BR1"
+        "tag": "BR1",
+        "manual_rank": ""
     },
     {
         "nick": "O Magro de OZ",
-        "tag": "BR1"
+        "tag": "BR1",
+        "manual_rank": ""
     },
     {
         "nick": "PabIo Escobar",
-        "tag": "INTEN"
+        "tag": "INTEN",
+        "manual_rank": ""
     },
     {
         "nick": "Murakami UHULL",
-        "tag": "BR1"
+        "tag": "BR1",
+        "manual_rank": ""
     },
     {
         "nick": "FEFE TA DE SWAIN",
-        "tag": "DEMON"
-    },
-    {
-        "nick": "MEC Viper",
-        "tag": "MEC"
+        "tag": "DEMON",
+        "manual_rank": ""
     },
     {
         "nick": "Sugiro Correr",
-        "tag": "BR1"
+        "tag": "BR1",
+        "manual_rank": ""
+    },
+    {
+        "nick": "Capita",
+        "tag": "CAPAO",
+        "manual_rank": ""
+    },
+    {
+        "nick": "Winter",
+        "tag": "169",
+        "manual_rank": ""
+    },
+    {
+        "nick": "MEC Viper",
+        "tag": "NOIA",
+        "manual_rank": ""
     }
 ]
