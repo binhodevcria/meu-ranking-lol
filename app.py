@@ -92,9 +92,6 @@ def github_commit_squad(squad_data, github_token, repo=GITHUB_REPO, branch=GITHU
 SQUAD_LIST = load_squad()
 
 NOME_DISPLAY = {
-    "GUIZINHA": "GUIZA",
-    "EZFALSE": "GUIZA",
-    "GUIZA": "GUIZA"
 }
 
 st.set_page_config(page_title="OFENSIVO SCORE", layout="wide", page_icon="⚔️")
@@ -896,7 +893,7 @@ def render():
                     '🏆 Maior Score': f"{max_score_row['Score']:.1f}",
                     '💥 Maior DPM': f"{max_dpm_row['DPM']:.0f}",
                     '⚔️ Mais Kills': int(max_kills_row['K']),
-                    '🎪 Mais X1': int(max_x1_row['SoloKills']),
+                    '🎪 Mais X1 (Total)': int(jdf['SoloKills'].sum()),
                     'Jogos': len(jdf)
                 })
             
