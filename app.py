@@ -51,11 +51,11 @@ def github_commit_squad(squad_data, github_token, repo=GITHUB_REPO, branch=GITHU
             "Authorization": f"Bearer {github_token}",
             "Accept": "application/vnd.github.v3+json"
         }
-
+        
         # 1. Pegar SHA atual do arquivo (necessário para update)
         url_get = f"https://api.github.com/repos/{repo}/contents/{SQUAD_FILE}?ref={branch}"
         resp_get = requests.get(url_get, headers=headers)
-
+        
         if resp_get.status_code == 404:
             # Arquivo não existe, será criado
             current_sha = None
@@ -63,11 +63,11 @@ def github_commit_squad(squad_data, github_token, repo=GITHUB_REPO, branch=GITHU
             current_sha = resp_get.json().get('sha')
         else:
             return False, f"Erro ao acessar repo: {resp_get.status_code}"
-
+        
         # 2. Preparar conteúdo em base64
         content_json = json.dumps(squad_data, indent=4, ensure_ascii=False)
         content_b64 = base64.b64encode(content_json.encode('utf-8')).decode('utf-8')
-
+        
         # 3. Fazer commit
         url_put = f"https://api.github.com/repos/{repo}/contents/{SQUAD_FILE}"
         payload = {
@@ -77,15 +77,15 @@ def github_commit_squad(squad_data, github_token, repo=GITHUB_REPO, branch=GITHU
         }
         if current_sha:
             payload["sha"] = current_sha
-
+        
         resp_put = requests.put(url_put, headers=headers, json=payload)
-
+        
         if resp_put.status_code in [200, 201]:
             return True, "✅ Commit realizado com sucesso!"
         else:
             error_msg = resp_put.json().get('message', 'Erro desconhecido')
             return False, f"Erro no commit: {error_msg}"
-
+            
     except Exception as e:
         return False, f"Erro: {str(e)}"
 
@@ -163,17 +163,17 @@ class BravuraEngine:
     def calculate_performance_score(vitoria, part, dano_est, dano_camp, minutos, pinks, solo_kills, plates, multi_score):
         """Calcula APENAS a performance positiva (sem penalidades) para o histórico"""
         if minutos < 10: return 0.0
-
+        
         # 1. Base
         score = 25.0 if vitoria else 0.0
-
+        
         # 2. Performance
         dpm = dano_camp / minutos if minutos > 0 else 0
         score += (part * 40)       # KP
         score += (dpm / 100)       # Dano
         score += (dano_est / 500)  # Objetivos
         score += (pinks * 2.0)     # Visão (X2)
-
+        
         # 3. Agressividade Extra (Novas Features)
         score += (solo_kills * 2.0) # X1
         score += (plates * 1.0)     # Placas
@@ -186,7 +186,6 @@ def get_rank_bravura(media):
     if media < 25: return "🛡️ Defesa"
     if media < 45: return "🌿 Herbívoro"
     if media < 65: return "🤝 Honra Tentou"
-    if media < 85: return "⚔️ Ofensivo"
     if media < 80: return "⚔️ Ofensivo"
     return "💉 Viciado em Dopamina"
 
@@ -195,11 +194,11 @@ def get_rank_bravura(media):
 # ==============================================================================
 class DatabaseAdapter:
     FILE_DB = 'leaguestats_bravura.csv'
-
+    
     def __init__(self):
         # Garante que o arquivo existe com TODAS as colunas
         expected_cols = list(MatchStats.model_fields.keys())
-
+        
         if not os.path.exists(self.FILE_DB):
             pd.DataFrame(columns=expected_cols).to_csv(self.FILE_DB, index=False)
         else:
@@ -214,7 +213,7 @@ class DatabaseAdapter:
                         else:
                             df[col] = 0
                         changed = True
-
+                
                 if changed: df.to_csv(self.FILE_DB, index=False)
             except: pass
 
@@ -223,7 +222,7 @@ class DatabaseAdapter:
             df = pd.read_csv(self.FILE_DB, dtype={'MatchID': str})
             if df.empty: return pd.DataFrame()
             df['Jogador'] = df['Jogador'].apply(lambda x: NOME_DISPLAY.get(str(x).upper(), str(x).upper()))
-
+            
             # Converte tudo que é numérico
             num_cols = ['Score', 'K', 'D', 'A', 'Part', 'DPM', 'Dano_Estruturas', 'Pinks', 'Timestamp', 'SoloKills', 'Plates', 'Multikills']
             for c in num_cols: 
@@ -237,7 +236,7 @@ class DatabaseAdapter:
             stats_id = str(stats.MatchID)
             stats_player = str(stats.Jogador).upper()
             df['MatchID'] = df['MatchID'].astype(str)
-
+            
             # Checa duplicidade
             if not ((df['MatchID'] == stats_id) & (df['Jogador'] == stats_player)).any():
                 # Transforma o objeto stats em DataFrame garantindo as colunas
@@ -246,12 +245,12 @@ class DatabaseAdapter:
                 return True
             return False
         except: return False
-
+    
     def reset_database(self):
         if os.path.exists(self.FILE_DB): os.remove(self.FILE_DB)
         pd.DataFrame(columns=MatchStats.model_fields.keys()).to_csv(self.FILE_DB, index=False)
         return True
-
+    
     def get_existing_match_ids(self, jogador=None):
         """Retorna set de MatchIDs já salvos (opcionalmente filtrado por jogador)"""
         try:
@@ -290,23 +289,23 @@ class RiotAdapter:
         try:
             # Tenta a API de Summoner por PUUID
             summ = self.request_blindado(f"https://br1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}")
-
+            
             if not summ: 
                 if debug_log: debug_log("⚠️ Summoner não encontrado")
                 return "N/D"
-
+            
             # Tenta pegar o ID do summoner
             summoner_id = summ.get('id') or summ.get('summonerId') or summ.get('encryptedSummonerId')
-
+            
             # Se não encontrou ID, a API da Riot está com problemas (bug conhecido)
             if not summoner_id:
                 if debug_log: debug_log("⚠️ API Riot sem ID (bug conhecido)")
                 return "N/D"  # Não Disponível - problema na API
-
+            
             if debug_log: debug_log(f"📋 ID OK")
-
+            
             leagues = self.request_blindado(f"https://br1.api.riotgames.com/lol/league/v4/entries/by-summoner/{summoner_id}")
-
+            
             if leagues:
                 # Tenta Flex primeiro
                 flex = next((l for l in leagues if l['queueType'] == "RANKED_FLEX_SR"), None)
@@ -314,20 +313,19 @@ class RiotAdapter:
                     rank = f"{flex['tier']} {flex['rank']}"
                     if debug_log: debug_log(f"✅ {rank}")
                     return rank
-
+                
                 # Fallback para Solo/Duo
                 solo = next((l for l in leagues if l['queueType'] == "RANKED_SOLO_5x5"), None)
                 if solo:
                     rank = f"{solo['tier']} {solo['rank']} (Solo)"
                     if debug_log: debug_log(f"✅ {rank}")
                     return rank
-
+                    
             return "Unranked"
         except Exception as e: 
             if debug_log: debug_log(f"❌ {str(e)[:30]}")
             return "N/D"
 
-    def fetch_recent_flex(self, nome, tag, existing_ids=None, cached_rank=None, debug_log=None):
     def fetch_recent_flex(self, nome, tag, existing_ids=None, cached_rank=None, debug_log=None, manual_rank_override=None):
         """
         Busca partidas recentes de Flex.
@@ -339,33 +337,31 @@ class RiotAdapter:
         try:
             if existing_ids is None:
                 existing_ids = set()
-
+            
             n, t = quote(nome.strip()), quote(tag.replace('#','').strip())
             acc = self.request_blindado(f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{n}/{t}")
             if not acc: return None, 0, "Conta não achada"
             puuid = acc['puuid']
-
-            # Usa rank cacheado ou busca novo (com debug)
-            rank_atual = cached_rank if cached_rank else self.fetch_rank(puuid, debug_log=debug_log)
+            
             # Prioridade: 1. Override manual, 2. Cache, 3. API
             if manual_rank_override:
                 rank_atual = manual_rank_override
                 if debug_log: debug_log(f"📌 Rank Manual: {rank_atual}")
             else:
                 rank_atual = cached_rank if cached_rank else self.fetch_rank(puuid, debug_log=debug_log)
-
+            
             # Timestamp 1767225600 = 01/01/2026 00:00:00 UTC
             url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=440&startTime=1767225600&start=0&count={BATCH_SIZE}"
             m_ids = self.request_blindado(url)
-
+            
             if not m_ids: return [], 0, "Sem Flex Recente"
-
+            
             # Filtra IDs que já existem no banco (OTIMIZAÇÃO PRINCIPAL)
             new_ids = [m_id for m_id in m_ids if str(m_id) not in existing_ids]
-
+            
             if not new_ids:
                 return [], 0, "Tudo sincronizado"
-
+            
             data = []
             for m_id in new_ids:
                 d = self.request_blindado(f"https://americas.api.riotgames.com/lol/match/v5/matches/{m_id}")
@@ -376,12 +372,12 @@ class RiotAdapter:
                     if p:
                         mins = d['info']['gameDuration']/60
                         if mins < 1: mins = 1  # Evita divisão por zero
-
+                        
                         # Extração Segura das Novas Métricas
                         challenges = p.get('challenges', {})
                         solo_kills = challenges.get('soloKills', 0)
                         plates = challenges.get('turretPlatesTaken', 0)
-
+                        
                         multi_score = (p.get('doubleKills', 0)*1) + (p.get('tripleKills', 0)*3) + (p.get('quadraKills', 0)*5) + (p.get('pentaKills', 0)*10)
 
                         sc = BravuraEngine.calculate_performance_score(
@@ -389,7 +385,7 @@ class RiotAdapter:
                             p['damageDealtToBuildings'], p['totalDamageDealtToChampions'], mins, 
                             p['visionWardsBoughtInGame'], solo_kills, plates, multi_score
                         )
-
+                        
                         data.append(MatchStats(
                             MatchID=str(m_id), 
                             Data=datetime.fromtimestamp(d['info']['gameCreation']/1000).strftime('%d/%m'), 
@@ -473,7 +469,6 @@ class GeminiAdapter:
 def render():
     db = DatabaseAdapter()
     riot = RiotAdapter(st.secrets.get("RIOT_KEY", ""))
-    gemini = genai.GenerativeModel('models/gemini-1.5-flash') if st.secrets.get("GEMINI_KEY") else None
     
     # Inicializa Gemini Adapter
     gemini_key = st.secrets.get("GEMINI_KEY")
@@ -485,25 +480,22 @@ def render():
     with st.sidebar:
         st.header("🎮 Painel deidara HO")
         acao = st.radio("Ação:", ["Sincronizar Squad (API)", "Subir Print (Custom)"])
-
+        
         if acao == "Sincronizar Squad (API)":
             if st.button(f"🔄 Sincronizar (Últimas {BATCH_SIZE})"):
                 log = st.status("Verificando partidas recentes...", expanded=True)
                 total_added = 0
-
+                
                 for p in SQUAD_LIST:
                     log.write(f"🔎 **{p['nick']}**...")
-
+                    
                     # CORREÇÃO: Busca IDs existentes APENAS para este jogador
-                    # Isso garante que se A e B jogaram juntos, ambos salvam a partida
                     existing_player_ids = db.get_existing_match_ids(jogador=p['nick'])
-
-                    # Passa os IDs existentes e a função de log para debug
+                    
                     # Passa os IDs existentes, log de debug e OVERRIDE DE RANK
                     matches, count, msg = riot.fetch_recent_flex(
                         p['nick'], p['tag'], 
                         existing_ids=existing_player_ids,
-                        debug_log=log.write
                         debug_log=log.write,
                         manual_rank_override=p.get('manual_rank')
                     )
@@ -514,10 +506,7 @@ def render():
                                 saved += 1
                         total_added += saved
                         if saved > 0: log.write(f"✅ +{saved} novas!")
-                        total_added += saved
-                        if saved > 0: log.write(f"✅ +{saved} novas!")
                     else: log.error(f"❌ Erro: {msg}")
-                    # Removido time.sleep(0.2) - desnecessário com rate limiting
 
                 log.update(label="Fim!", state="complete", expanded=False)
                 if total_added > 0:
@@ -601,24 +590,17 @@ def render():
                                     st.error(f"Erro ao processar: {e}")
                         else:
                             st.warning("Faça upload de uma imagem!")
-
+        
         st.markdown("---")
         with st.expander("🛠️ Admin - Gerenciar Squad"):
             st.markdown("### 👥 Squad Atual")
-
+            
             # Inicializa session_state para edição do squad
             if 'temp_squad' not in st.session_state:
                 st.session_state.temp_squad = SQUAD_LIST.copy()
-
-            # Mostrar jogadores atuais com botão de remover
+            
             # Mostrar jogadores atuais com botão de remover e RANK MANUAL
             for i, player in enumerate(st.session_state.temp_squad):
-                col1, col2, col3 = st.columns([3, 2, 1])
-                with col1:
-                    st.text(player['nick'])
-                with col2:
-                    st.text(f"#{player['tag']}")
-                with col3:
                 c1, c2, c3, c4 = st.columns([2, 1.5, 2, 0.5])
                 with c1: st.text(f"{player['nick']}")
                 with c2: st.text(f"#{player['tag']}")
@@ -636,16 +618,16 @@ def render():
                     if st.button("❌", key=f"remove_{i}"):
                         st.session_state.temp_squad.pop(i)
                         st.rerun()
-
+            
             st.markdown("---")
             st.markdown("### ➕ Adicionar Jogador")
-
+            
             col_nick, col_tag = st.columns([3, 2])
             with col_nick:
                 new_nick = st.text_input("Nick do jogador:", key="new_nick", placeholder="Ex: NovoJogador")
             with col_tag:
                 new_tag = st.text_input("Tag:", key="new_tag", placeholder="Ex: BR1")
-
+            
             if st.button("➕ Adicionar ao Squad"):
                 if new_nick and new_tag:
                     st.session_state.temp_squad.append({"nick": new_nick.strip(), "tag": new_tag.strip()})
@@ -653,21 +635,21 @@ def render():
                     st.rerun()
                 else:
                     st.warning("Preencha nick e tag!")
-
+            
             # Verificar se houve alterações
             if st.session_state.temp_squad != SQUAD_LIST:
                 st.markdown("---")
                 st.success("✅ **Alterações detectadas!**")
-
+                
                 # Gerar JSON formatado
                 json_output = json.dumps(st.session_state.temp_squad, indent=4, ensure_ascii=False)
-
+                
                 with st.expander("📋 Ver JSON gerado"):
                     st.code(json_output, language="json")
-
+                
                 st.markdown("---")
                 st.markdown("### 🚀 Salvar no GitHub")
-
+                
                 # Input para GitHub Token
                 github_token = st.text_input(
                     "GitHub Personal Access Token:", 
@@ -675,7 +657,7 @@ def render():
                     help="Crie um token em GitHub → Settings → Developer settings → Personal access tokens",
                     key="github_token"
                 )
-
+                
                 # Input para o repositório (pré-preenchido mas editável)
                 github_repo = st.text_input(
                     "Repositório (usuario/repo):",
@@ -683,9 +665,9 @@ def render():
                     help="Ex: gabri/LoL_Rank",
                     key="github_repo"
                 )
-
+                
                 col_commit, col_undo = st.columns(2)
-
+                
                 with col_commit:
                     if st.button("📤 Fazer Commit no GitHub", type="primary"):
                         if github_token and github_repo:
@@ -703,12 +685,12 @@ def render():
                                 st.error(msg)
                         else:
                             st.warning("Preencha o token e o repositório!")
-
+                
                 with col_undo:
                     if st.button("🔄 Desfazer alterações"):
                         st.session_state.temp_squad = SQUAD_LIST.copy()
                         st.rerun()
-
+            
             st.markdown("---")
             st.markdown("### 🗑️ Resetar Dados")
             if st.button("⚠️ Resetar Tudo (Limpar Partidas)"):
@@ -725,14 +707,14 @@ def render():
         ["Nivelar por Cima", "Nivelar por Baixo"],
         help="'Por Baixo': usa a menor quantidade de jogos do squad para todos. 'Por Cima': usa todos os jogos disponíveis."
     )
-
+    
     df_ranking = pd.DataFrame()
     min_games = 0
     if not df_f.empty:
         # Calcular quantidade de jogos por jogador
         games_per_player = df_f.groupby('Jogador').size()
         min_games = games_per_player.min() if not games_per_player.empty else 0
-
+        
         if nivel_modo == "Nivelar por Baixo" and min_games > 0:
             # Usa apenas as últimas N partidas de cada jogador (N = mínimo do squad)
             window = min(min_games, RANKING_WINDOW)
@@ -747,38 +729,38 @@ def render():
         for p in todos:
             d = df_ranking[df_ranking['Jogador'] == p]
             if d.empty: continue
-
+            
             # --- CÁLCULO DETALHADO DO SCORE (MÉDIA DA JANELA) ---
             # 1. Base
             avg_win = d['Vitoria'].mean() * 25.0
-
+            
             # 2. Performance
             avg_kp = d['Part'].mean() * 40.0
             avg_dpm = d['DPM'].mean() / 100.0
             avg_obj = d['Dano_Estruturas'].mean() / 500.0
             avg_vis = d['Pinks'].mean() * 2.0
-
+            
             # 3. Agressividade
             avg_x1 = d['SoloKills'].mean() * 2.0
             avg_plates = d['Plates'].mean() * 1.0
             avg_multi = d['Multikills'].mean() 
-
+            
             # Soma Bruta
             final_score = avg_win + avg_kp + avg_dpm + avg_obj + avg_vis + avg_x1 + avg_plates + avg_multi
-
+            
             # 4. Penalidades Holísticas
             penalidade = 0.0
-
+            
             # KDA Player: Se a MÉDIA de mortes for <= 2 e a MÉDIA de KP for < 35%
             if d['D'].mean() <= 2.0 and d['Part'].mean() < 0.35:
                 penalidade -= 25.0
-
+            
             # Pacifista: Se a MÉDIA de Dano por Minuto for < 300
             if d['DPM'].mean() < 300:
                 penalidade -= 10.0
-
+            
             final_score += penalidade
-
+            
             ranking_data.append({
                 'Jogador': p,
                 'Score Final': final_score,
@@ -792,7 +774,7 @@ def render():
                 'Pts_X1': avg_x1, 'Pts_Plates': avg_plates, 'Pts_Multi': avg_multi,
                 'Penalidade': penalidade
             })
-
+            
     df_final = pd.DataFrame(ranking_data).sort_values('Score Final', ascending=False)
 
     t1, t2, t3, t4, t5, t6, t7, t8, t9, t10 = st.tabs([
@@ -804,22 +786,22 @@ def render():
     with t1:
         if not df_final.empty:
             k1, k2, k3, k4 = st.columns(4)
-
+            
             mvp_row = df_final.iloc[0]
             k1.metric("🔥 MVP (Score)", mvp_row['Jogador'], f"{mvp_row['Score Final']:.1f}")
-
+            
             dmg_king = df_final.loc[df_final['Max_DPM'].idxmax()]
             k2.metric("💀 Maior Dano (Pico)", dmg_king['Jogador'], f"{dmg_king['Max_DPM']:.0f}")
-
+            
             x1_king = df_final.loc[df_final['Total_X1'].idxmax()]
             k3.metric("🎪 Circo (Rei X1)", x1_king['Jogador'], f"{int(x1_king['Total_X1'])} Kills")
-
+            
             # Mostra info do modo de nivelamento
             if nivel_modo == "Nivelar por Baixo":
                 k4.metric("⚖️ Nivelado", f"Mín {min_games} jogos", "Por Baixo")
             else:
                 k4.metric("⚖️ Janela Ranking", f"Últimas {RANKING_WINDOW}", "Por Cima")
-
+            
             st.markdown("---")
             c1, c2 = st.columns([1.5, 2])
             with c1:
@@ -841,7 +823,7 @@ def render():
                 p_dmg = agg['DPM'].idxmax()
                 p_mvp = agg['Score'].idxmax()
                 p_kda = agg['D'].idxmax()
-
+                
                 with m1: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🐢</div><div class='medal-title'>ARIEL</div><div class='medal-player'>{p_safe}</div><span class='medal-desc'>Mais Safe (Menor KP)</span></div>", unsafe_allow_html=True)
                 with m2: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🧨</div><div class='medal-title'>DANUDO</div><div class='medal-player'>{p_dmg}</div><span class='medal-desc'>Maior Dano Médio</span></div>", unsafe_allow_html=True)
                 with m3: st.markdown(f"<div class='medal-box'><div class='medal-icon'>🔪</div><div class='medal-title'>DINIZ</div><div class='medal-player'>{p_mvp}</div><span class='medal-desc'>Maior Soma de Pontos</span></div>", unsafe_allow_html=True)
@@ -896,19 +878,19 @@ def render():
         st.subheader("📈 Recordes Pessoais")
         if not df_f.empty:
             st.markdown("*Os maiores feitos de cada jogador na temporada*")
-
+            
             # Recordes por categoria
             records_data = []
             for jogador in df_f['Jogador'].unique():
                 jdf = df_f[df_f['Jogador'] == jogador]
                 if jdf.empty: continue
-
+                
                 # Pega a partida com maior score, maior DPM, etc.
                 max_score_row = jdf.loc[jdf['Score'].idxmax()]
                 max_dpm_row = jdf.loc[jdf['DPM'].idxmax()]
                 max_kills_row = jdf.loc[jdf['K'].idxmax()]
                 max_x1_row = jdf.loc[jdf['SoloKills'].idxmax()]
-
+                
                 records_data.append({
                     'Jogador': jogador,
                     '🏆 Maior Score': f"{max_score_row['Score']:.1f}",
@@ -917,17 +899,17 @@ def render():
                     '🎪 Mais X1': int(max_x1_row['SoloKills']),
                     'Jogos': len(jdf)
                 })
-
+            
             if records_data:
                 df_records = pd.DataFrame(records_data)
                 st.dataframe(df_records.set_index('Jogador'), use_container_width=True)
-
+                
                 # Top 3 recordes visuais
                 st.markdown("---")
                 st.markdown("### 🥇 Hall da Fama")
-
+                
                 col1, col2, col3 = st.columns(3)
-
+                
                 # Maior Score de todos
                 best_score = df_f.loc[df_f['Score'].idxmax()]
                 with col1:
@@ -939,7 +921,7 @@ def render():
                         <span class='medal-desc'>{best_score['Score']:.1f} pts em {best_score['Data']}</span>
                     </div>
                     """, unsafe_allow_html=True)
-
+                
                 # Maior DPM de todos
                 best_dpm = df_f.loc[df_f['DPM'].idxmax()]
                 with col2:
@@ -951,7 +933,7 @@ def render():
                         <span class='medal-desc'>{best_dpm['DPM']:.0f} DPM em {best_dpm['Data']}</span>
                     </div>
                     """, unsafe_allow_html=True)
-
+                
                 # Mais kills em uma partida
                 best_kills = df_f.loc[df_f['K'].idxmax()]
                 with col3:
@@ -972,12 +954,12 @@ def render():
         if not df_f.empty and 'Champion' in df_f.columns:
             # Filtro de jogador
             selected_player = st.selectbox("Selecione o jogador:", ["Todos"] + sorted(df_f['Jogador'].unique().tolist()))
-
+            
             if selected_player != "Todos":
                 df_champ = df_f[df_f['Jogador'] == selected_player]
             else:
                 df_champ = df_f
-
+            
             # Agregar por campeão
             champ_stats = df_champ.groupby('Champion').agg({
                 'Vitoria': ['sum', 'count'],
@@ -987,20 +969,20 @@ def render():
                 'DPM': 'mean',
                 'Score': 'mean'
             }).round(2)
-
+            
             champ_stats.columns = ['Vitórias', 'Jogos', 'K (avg)', 'D (avg)', 'A (avg)', 'DPM (avg)', 'Score (avg)']
             champ_stats['Winrate'] = ((champ_stats['Vitórias'] / champ_stats['Jogos']) * 100).round(1).astype(str) + '%'
             champ_stats = champ_stats.sort_values('Jogos', ascending=False)
-
+            
             # Filtrar campeões "Unknown" se houver muitos dados reais
             if 'Unknown' in champ_stats.index and len(champ_stats) > 1:
                 unknown_count = champ_stats.loc['Unknown', 'Jogos'] if 'Unknown' in champ_stats.index else 0
                 total_count = champ_stats['Jogos'].sum()
                 if unknown_count < total_count * 0.5:  # Se menos de 50% é Unknown
                     st.warning("⚠️ Alguns dados antigos não têm campeão registrado (mostrados como 'Unknown'). Sincronize novamente para atualizar!")
-
+            
             st.dataframe(champ_stats[['Jogos', 'Winrate', 'K (avg)', 'D (avg)', 'A (avg)', 'DPM (avg)', 'Score (avg)']], use_container_width=True)
-
+            
             # Gráfico de pizza dos campeões mais jogados
             if len(champ_stats) > 1:
                 top_champs = champ_stats.head(8).reset_index()
@@ -1017,11 +999,11 @@ def render():
         st.subheader("👥 Sinergia entre Jogadores")
         if not df_f.empty:
             st.markdown("*Análise de performance quando jogadores jogam juntos*")
-
+            
             # Identificar partidas com múltiplos jogadores do squad
             match_players = df_f.groupby('MatchID')['Jogador'].apply(list).reset_index()
             match_results = df_f.groupby('MatchID')['Vitoria'].first().reset_index()
-
+            
             # Calcular duos
             duo_stats = {}
             for _, row in match_players.iterrows():
@@ -1029,7 +1011,7 @@ def render():
                 if len(players) >= 2:
                     match_id = row['MatchID']
                     won = match_results[match_results['MatchID'] == match_id]['Vitoria'].values[0]
-
+                    
                     # Para cada par de jogadores na partida
                     for duo in combinations(sorted(players), 2):
                         duo_key = f"{duo[0]} & {duo[1]}"
@@ -1038,7 +1020,7 @@ def render():
                         duo_stats[duo_key]['games'] += 1
                         if won:
                             duo_stats[duo_key]['wins'] += 1
-
+            
             if duo_stats:
                 # Converter para DataFrame
                 duo_data = []
@@ -1052,29 +1034,29 @@ def render():
                             'Winrate': f"{winrate:.1f}%",
                             'Winrate_num': winrate
                         })
-
+                
                 if duo_data:
                     df_duos = pd.DataFrame(duo_data).sort_values('Jogos Juntos', ascending=False)
-
+                    
                     # Métricas principais
                     col1, col2, col3 = st.columns(3)
-
+                    
                     best_duo = df_duos.loc[df_duos['Winrate_num'].idxmax()]
                     worst_duo = df_duos.loc[df_duos['Winrate_num'].idxmin()]
                     most_games_duo = df_duos.iloc[0]
-
+                    
                     with col1:
                         st.metric("🏆 Melhor Duo", best_duo['Dupla'], f"{best_duo['Winrate']} WR")
                     with col2:
                         st.metric("🤝 Duo Mais Frequente", most_games_duo['Dupla'], f"{most_games_duo['Jogos Juntos']} jogos")
                     with col3:
                         st.metric("💀 Pior Duo", worst_duo['Dupla'], f"{worst_duo['Winrate']} WR")
-
+                    
                     st.markdown("---")
-
+                    
                     # Tabela completa
                     st.dataframe(df_duos[['Dupla', 'Jogos Juntos', 'Vitórias', 'Winrate']], use_container_width=True)
-
+                    
                     # Gráfico de barras horizontal
                     fig = px.bar(df_duos.head(10), x='Winrate_num', y='Dupla', orientation='h',
                                 color='Winrate_num', color_continuous_scale='RdYlGn',
